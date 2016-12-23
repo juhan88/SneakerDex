@@ -5,3 +5,6 @@ Index of Latest Sneakers
 `node -v v6.3.0`
 
 Using nwb middleware
+
+# To start the App
+`npm run start`

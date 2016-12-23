@@ -1,12 +1,13 @@
 {
   "name": "SneakerDex",
   "version": "1.0.0",
-  "description": "Describe SneakerDex here",
+  "description": "SneakerDex is Index of Sneakers",
   "private": true,
   "scripts": {
     "build": "nwb build-react-app",
     "clean": "nwb clean-app",
     "start": "nwb serve-react-app",
+    "start-dev": "nwb serve-react-app",
     "test": "nwb test-react",
     "test:coverage": "nwb test-react --coverage",
     "test:watch": "nwb test-react --server"
