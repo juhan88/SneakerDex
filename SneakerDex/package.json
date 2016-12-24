@@ -14,10 +14,13 @@
   },
   "dependencies": {
     "react": "^15.4.1",
+    "react-bootstrap": "^0.30.7",
     "react-dom": "^15.4.1"
   },
   "devDependencies": {
-    "nwb": "0.13.x"
+    "bootstrap": "^3.3.7",
+    "nwb": "0.13.x",
+    "react-bootstrap": "^0.30.7"
   },
   "author": "",
   "license": "MIT",
