@@ -1,31 +1,34 @@
 // import './App.css'
 
 import React from 'react'
+var TileLayout = require('pui-react-tile-layout').TileLayout;
+var TileLayoutItem = require('pui-react-tile-layout').TileLayoutItem;
+var ClickableAltPanel = require('pui-react-panels').ClickableAltPanel;
 
 class LandingPage extends React.Component {
   render() {
-    return <div className="container">
-            <div className="row">
-              <div className="col-md-3 portfolio-item">
-                      <img className="img-responsive" src="http://placehold.it/750x450" alt=""/>
-              </div>
-              <div className="col-md-3 portfolio-item">
-                      <img className="img-responsive" src="http://placehold.it/750x450" alt=""/>
-              </div>
-              <div className="col-md-3 portfolio-item">
-                    <img className="img-responsive" src="http://placehold.it/750x450" alt=""/>
-              </div>
-              <div className="col-md-3 portfolio-item">
-                      <img className="img-responsive" src="http://placehold.it/750x450" alt=""/>
-              </div>
-            </div>
-
-
+    return <div className="container-fluid">
+              <TileLayout columns={3}>
+                <TileLayoutItem>
+                  <ClickableAltPanel><Tile name={this.props.name}/></ClickableAltPanel>
+                </TileLayoutItem>
+                <TileLayoutItem>
+                  <ClickableAltPanel><Tile name={this.props.name}/></ClickableAltPanel>
+                </TileLayoutItem>
+                <TileLayoutItem>
+                  <ClickableAltPanel><Tile name={this.props.name}/></ClickableAltPanel>
+                </TileLayoutItem>
+                <TileLayoutItem>
+                  <ClickableAltPanel><Tile name={this.props.name}/></ClickableAltPanel>
+                </TileLayoutItem>
+                <TileLayoutItem>
+                  <ClickableAltPanel><Tile name={this.props.name}/></ClickableAltPanel>
+                </TileLayoutItem>
+                <TileLayoutItem>
+                  <ClickableAltPanel><Tile name={this.props.name}/></ClickableAltPanel>
+                </TileLayoutItem>
+              </TileLayout>
           </div>
-
-
-
-
   }
 }
 
@@ -72,7 +75,7 @@ let App = React.createClass({
       </div>
       <div className="App-instructions App-flex">
       <LandingPage/>
-        <Tile name="Air Jordan 11 Space Jam"></Tile>
+
       </div>
     </div>
   }
