@@ -1,4 +1,4 @@
-// import './App.css'
+import './App.css'
 
 import React from 'react'
 import Tile from './Tiles/Tile'
@@ -8,7 +8,6 @@ var ClickableAltPanel = require('pui-react-panels').ClickableAltPanel;
 
 class LandingPage extends React.Component {
   render() {
-
     return <div className="container-fluid">
               <TileLayout columns={3}>
                 <TileLayoutItem>
@@ -34,21 +33,12 @@ class LandingPage extends React.Component {
   }
 }
 
-
-
-
-
-
-
-
 class SneakerDexHeader extends React.Component {
   render(){
-    return <nav className="navbar navbar-inverse">
-            <div className="container-fluid">
-              <div className="navbar-header">
+    return <nav className="navbar navbar-inverse" data-spy="affix" data-offset-top="197">
+            <ul className="nav navbar-nav">
                 <a className="navbar-brand" href="#">SneakerDex</a>
-              </div>
-            </div>
+            </ul>
           </nav>
   }
 }
@@ -57,6 +47,7 @@ class App extends React.Component {
   render() {
     return <div className="App">
       <SneakerDexHeader/>
+
       <LandingPage name="Air Jordan XI Space Jams"/>
     </div>
   }
