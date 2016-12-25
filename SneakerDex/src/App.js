@@ -8,8 +8,26 @@ var ClickableAltPanel = require('pui-react-panels').ClickableAltPanel;
 
 class LandingPage extends React.Component {
   render() {
-    return <div className="container-fluid">
+    return <div className="container-fluid sneakerdex-body">
               <TileLayout columns={3}>
+                <TileLayoutItem>
+                  <ClickableAltPanel><Tile name={this.props.name}/></ClickableAltPanel>
+                </TileLayoutItem>
+                <TileLayoutItem>
+                  <ClickableAltPanel><Tile name={this.props.name}/></ClickableAltPanel>
+                </TileLayoutItem>
+                <TileLayoutItem>
+                  <ClickableAltPanel><Tile name={this.props.name}/></ClickableAltPanel>
+                </TileLayoutItem>
+                <TileLayoutItem>
+                  <ClickableAltPanel><Tile name={this.props.name}/></ClickableAltPanel>
+                </TileLayoutItem>
+                <TileLayoutItem>
+                  <ClickableAltPanel><Tile name={this.props.name}/></ClickableAltPanel>
+                </TileLayoutItem>
+                <TileLayoutItem>
+                  <ClickableAltPanel><Tile name={this.props.name}/></ClickableAltPanel>
+                </TileLayoutItem>
                 <TileLayoutItem>
                   <ClickableAltPanel><Tile name={this.props.name}/></ClickableAltPanel>
                 </TileLayoutItem>
@@ -35,7 +53,7 @@ class LandingPage extends React.Component {
 
 class SneakerDexHeader extends React.Component {
   render(){
-    return <nav className="navbar navbar-inverse" data-spy="affix" data-offset-top="197">
+    return <nav className="navbar navbar-inverse navbar-fixed-top sneakerdex-nav">
             <ul className="nav navbar-nav">
                 <a className="navbar-brand" href="#">SneakerDex</a>
             </ul>

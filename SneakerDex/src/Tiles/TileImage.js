@@ -1,8 +1,11 @@
 import React from 'react'
+import "../App.css"
 
 class TileImage extends React.Component {
   render() {
-    return <img src ="/images/space-jam.jpg"/>
+    return <div className="item">
+            <img src ="/images/space-jam.jpg"/>
+           </div>
   }
 }
 
