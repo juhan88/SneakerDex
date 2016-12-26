@@ -54,12 +54,13 @@ class LandingPage extends React.Component {
 class SneakerDexHeader extends React.Component {
   render(){
     return <nav className="navbar navbar-inverse navbar-fixed-top sneakerdex-nav">
-            <ul className="nav navbar-nav">
+            <ul className="topnav">
                 <a className="navbar-brand" href="#">SneakerDex</a>
             </ul>
           </nav>
   }
 }
+
 
 class App extends React.Component {
   render() {

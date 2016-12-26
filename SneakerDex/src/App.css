@@ -1,5 +1,7 @@
+<link rel="stylesheet" href="//fonts.googleapis.com/css?family=Open+Sans:300,400,600,700&amp;lang=en" />
+
 .sneakerdex-body{
-  padding-top: 3%;
+  padding-top: 20%;
 }
 
 img {
@@ -14,4 +16,37 @@ img {
     float: left;
     margin: 3px;
     padding: 3px;
+}
+
+.h1 {
+
+}
+
+.navbar-brand {
+    float: left;
+    height: 50px;
+    padding: 10px 15px;
+    font-size: 100px;
+    font-family: "Raleway", Helvetica, Arial, sans-serif;
+    font-size: 100px;
+    font-weight: 100;
+    line-height: 1.7857;
+    letter-spacing: 0;
+}
+
+.navbar-inverse {
+  width: 3000px;
+  border-color: #000000;
+  background-color: #222;
+  font-family: "Helvetica Neue",Helvetica,Arial,sans-serif;
+  /*font-color: #9d9d9d;*/
+  font-size: 100px;
+  /*letter-spacing: 2px;*/
+}
+
+.navbar {
+  position: relative;
+  min-height: 200px;
+  margin-bottom: 80px;
+  border: 1px solid transparent;
 }
