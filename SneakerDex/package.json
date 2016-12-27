@@ -13,9 +13,11 @@
     "test:watch": "nwb test-react --server"
   },
   "dependencies": {
+    "material-ui": "^0.16.6",
     "pui-react-panels": "^7.3.1",
     "pui-react-tile-layout": "^7.3.1",
     "react": "^15.4.1",
+    "react-addons-css-transition-group": "^15.4.1",
     "react-bootstrap": "^0.30.7",
     "react-dom": "^15.4.1",
     "react-favicon": "0.0.5",
@@ -24,7 +26,9 @@
   "devDependencies": {
     "bootstrap": "^3.3.7",
     "nwb": "0.13.x",
-    "react-bootstrap": "^0.30.7"
+    "nwb-sass": "^0.6.0",
+    "react-bootstrap": "^0.30.7",
+    "toolbox-loader": "0.0.3"
   },
   "author": "",
   "license": "MIT",
