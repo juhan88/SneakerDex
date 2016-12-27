@@ -6,10 +6,11 @@ import Tile from './Tiles/Tile'
 import SneakerDexHeader from './Template/SneakerDexHeader'
 import GridListExampleSimple from './Template/SneakerGrid'
 
+
 class App extends React.Component {
   render() {
     return <div className="App">
-        <SneakerDexHeader/>
+        <SneakerDexHeader/> 
           <MuiThemeProvider muiTheme={getMuiTheme(darkBaseTheme)}>
           <GridListExampleSimple/>
         </MuiThemeProvider>

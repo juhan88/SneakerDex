@@ -13,6 +13,7 @@ const styles = {
     display: 'flex',
     flexWrap: 'wrap',
     justifyContent: 'space-around',
+    padding: '20px'
   },
   gridList: {
     cellHeight: 225,
@@ -30,7 +31,7 @@ const GridListExampleSimple = () => (
       cellHeight={styles.gridList.cellHeight}
       style={styles.gridList}
     >
-      <Subheader>December</Subheader>
+      <Subheader></Subheader>
       {Sneakers.map((tile) => (
         <GridTile
           key={tile.img}
