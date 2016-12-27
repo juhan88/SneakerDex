@@ -1,75 +1,17 @@
-import './App.css'
+import Navigation from 'react-toolbox/lib/navigation';
+import Link from 'react-toolbox/lib/link';
 
-import React from 'react'
-import Tile from './Tiles/Tile'
-var TileLayout = require('pui-react-tile-layout').TileLayout;
-var TileLayoutItem = require('pui-react-tile-layout').TileLayoutItem;
-var ClickableAltPanel = require('pui-react-panels').ClickableAltPanel;
+const actions = [
+  { label: 'Alarm', raised: true, icon: 'access_alarm'},
+  { label: 'Location', raised: true, accent: true, icon: 'room'}
+];
 
-class LandingPage extends React.Component {
-  render() {
-    return <div className="container-fluid sneakerdex-body">
-              <TileLayout columns={3}>
-                <TileLayoutItem>
-                  <ClickableAltPanel><Tile name={this.props.name}/></ClickableAltPanel>
-                </TileLayoutItem>
-                <TileLayoutItem>
-                  <ClickableAltPanel><Tile name={this.props.name}/></ClickableAltPanel>
-                </TileLayoutItem>
-                <TileLayoutItem>
-                  <ClickableAltPanel><Tile name={this.props.name}/></ClickableAltPanel>
-                </TileLayoutItem>
-                <TileLayoutItem>
-                  <ClickableAltPanel><Tile name={this.props.name}/></ClickableAltPanel>
-                </TileLayoutItem>
-                <TileLayoutItem>
-                  <ClickableAltPanel><Tile name={this.props.name}/></ClickableAltPanel>
-                </TileLayoutItem>
-                <TileLayoutItem>
-                  <ClickableAltPanel><Tile name={this.props.name}/></ClickableAltPanel>
-                </TileLayoutItem>
-                <TileLayoutItem>
-                  <ClickableAltPanel><Tile name={this.props.name}/></ClickableAltPanel>
-                </TileLayoutItem>
-                <TileLayoutItem>
-                  <ClickableAltPanel><Tile name={this.props.name}/></ClickableAltPanel>
-                </TileLayoutItem>
-                <TileLayoutItem>
-                  <ClickableAltPanel><Tile name={this.props.name}/></ClickableAltPanel>
-                </TileLayoutItem>
-                <TileLayoutItem>
-                  <ClickableAltPanel><Tile name={this.props.name}/></ClickableAltPanel>
-                </TileLayoutItem>
-                <TileLayoutItem>
-                  <ClickableAltPanel><Tile name={this.props.name}/></ClickableAltPanel>
-                </TileLayoutItem>
-                <TileLayoutItem>
-                  <ClickableAltPanel><Tile name={this.props.name}/></ClickableAltPanel>
-                </TileLayoutItem>
-              </TileLayout>
-          </div>
-  }
-}
-
-class SneakerDexHeader extends React.Component {
-  render(){
-    return <nav className="navbar navbar-inverse navbar-fixed-top sneakerdex-nav">
-            <ul className="topnav">
-                <a className="navbar-brand" href="#">SneakerDex</a>
-            </ul>
-          </nav>
-  }
-}
-
-
-class App extends React.Component {
-  render() {
-    return <div className="App">
-      <SneakerDexHeader/>
-
-      <LandingPage name="Air Jordan XI Space Jams"/>
-    </div>
-  }
-}
-
-export default App
+const NavigationTest = () => (
+  <div>
+    <Navigation type='horizontal' actions={actions} />
+    <Navigation type='vertical'>
+      <Link href='http://' label='Inbox' icon='inbox' />
+      <Link href='http://' active label='Profile' icon='person' />
+    </Navigation>
+  </div>
+);
