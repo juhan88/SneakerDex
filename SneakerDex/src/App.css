@@ -44,9 +44,7 @@ img {
   /*letter-spacing: 2px;*/
 }
 
-.navbar {
-  position: relative;
-  min-height: 200px;
-  margin-bottom: 80px;
-  border: 1px solid transparent;
+
+.sneaker-grid {
+  font-family: Roboto, sans-serif;
 }
