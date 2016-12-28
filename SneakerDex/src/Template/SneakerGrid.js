@@ -18,6 +18,7 @@ const styles = {
   gridList: {
     cellHeight: 225,
     overflowY: 'auto',
+    cols: 3,
   },
   icon:{
     marginRight: 24,
@@ -30,6 +31,7 @@ const GridListExampleSimple = () => (
     <GridList
       cellHeight={styles.gridList.cellHeight}
       style={styles.gridList}
+      cols={styles.gridList.cols}
     >
       <Subheader></Subheader>
       {Sneakers.map((tile) => (
