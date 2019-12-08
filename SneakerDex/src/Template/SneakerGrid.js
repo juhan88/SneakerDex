@@ -19,6 +19,7 @@ const styles = {
     cols: 3,
     cellHeight: 225,
     overflowY: 'auto',
+    cols: 3,
   },
   icon:{
     marginRight: 24,
