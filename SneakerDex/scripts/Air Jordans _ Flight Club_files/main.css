@@ -1,0 +1,14 @@
+.sl_facebook img {
+    width: 16px;
+    height: 16px;
+    margin-top: -1px;
+}
+
+.sl_facebook i {
+    background: url("../../images/sociallogin/sprite.png") no-repeat scroll -24px -8px transparent;
+    display: inline-block;
+    float: left;
+    height: 16px;
+    margin: -1px 0 0 10px;
+    width: 16px;
+}

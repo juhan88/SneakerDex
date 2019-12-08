@@ -1,0 +1,1 @@
+jQuery(document).ready(function($){var currentItem=$(".suggestions-block .suggestions-header ul li");$(".suggestions-block .suggestions-header ul li").first().addClass("selected-item"),$(currentItem).click(function(){$(".selected-item").removeClass("selected-item"),$(this).addClass("selected-item")})});

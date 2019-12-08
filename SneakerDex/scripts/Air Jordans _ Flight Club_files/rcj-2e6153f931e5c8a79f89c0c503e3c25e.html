@@ -1,0 +1,81 @@
+<!DOCTYPE html>
+<!-- saved from url=(0065)https://vars.hotjar.com/rcj-2e6153f931e5c8a79f89c0c503e3c25e.html -->
+<html lang="en"><head><meta http-equiv="Content-Type" content="text/html; charset=UTF-8">
+    
+    <script>
+        // Whitelist all cookies we're allowed to get / set to avoid third parties reading sensitive data.
+        var READABLE_COOKIES = [
+                '_hjOptOut'
+            ],
+            WRITEABLE_COOKIES = [
+                '_hjOptOut'
+            ];
+
+        /**
+         * Get the value of a cookie.
+         *
+         * @param key The key (name) of the cookie.
+         * @returns {*} The value of the cookie or undefined if no cookie could be found.
+         */
+        function getCookie (key) {
+            var result;
+
+            if (READABLE_COOKIES.indexOf(key) === -1) {
+                throw new Error('Not allowed to read the value of the cookie: ' + key);
+            }
+
+            result = new RegExp("(?:^|; )" + key + "=([^;]*)").exec(document.cookie);
+            return result ? result[1] : undefined;
+        }
+
+        /**
+         * Set the value of a cookie.
+         *
+         * @param key The key (name) of the cookie.
+         * @param value The value of the cookie.
+         */
+        function setCookie (key, value, expiresDays) {
+            var expiresTime = new Date();
+
+            if (WRITEABLE_COOKIES.indexOf(key) === -1) {
+                throw new Error('Not allowed to write the value of the cookie: ' + key);
+            }
+
+            expiresTime.setDate(expiresTime.getDate() + expiresDays);
+            document.cookie = key + "=" + value + "; path=/; expires=" + expiresTime.toUTCString();
+        }
+
+        /**
+         * Process a message received from the parent window and act on it.
+         *
+         * @param event
+         */
+        function onMessage(event) {
+            switch (event.data.action) {
+                case 'set':
+                    setCookie(event.data.key, event.data.value, event.data.expiresDays);
+                    break;
+                case 'get':
+                    window.parent.postMessage({
+                        messageId: event.data.messageId,
+                        value: getCookie(event.data.key)
+                    }, '*');
+                    break;
+                default:
+                    throw new Error('Unknown action: ' + event.data.action);
+            }
+        }
+
+        // Listen to events from the parent window.
+        if (window.addEventListener) {
+            window.addEventListener('message', onMessage, false);
+        } else {
+            window.attachEvent('onmessage', onMessage);
+        }
+    </script>
+    </head>
+<body>
+
+
+
+</body></html>

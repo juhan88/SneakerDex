@@ -1,0 +1,1 @@
+jQuery(document).ready(function($){showToplinksSubmenu(),showMofSubmenu(),showMoreModels(),updateTopCartCounter(),updateMOFCount(),toggleTermsInOnepage(),scrollTopGrid(),activateProductNavigation(),applyTouchInteractionToImageGallery(),initializeFaq(),shareButton(),activateAffirm()});

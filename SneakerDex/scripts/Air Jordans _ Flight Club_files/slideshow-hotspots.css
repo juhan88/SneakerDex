@@ -1,0 +1,29 @@
+.carousel .hotspot {
+    position: absolute;
+    text-align: left;
+}
+
+.carousel .hotspot-icon {
+    height: 18px;
+    width: 20px;
+    padding-top: 1px;
+    text-align: center;
+    cursor: pointer;
+}
+
+.carousel .hotspot-icon {
+    font-size: 22px;
+    color: #FFFFFF;
+}
+
+.carousel .hotspot-content {
+    display: none;
+    border-radius: 4px;
+    width: 260px;
+    padding:8px 11px;
+    background: rgba(255,255,255,0.8);
+    font-size:12px;
+    color: #333;
+    -webkit-box-shadow: 0 6px 12px rgba(0,0,0,0.175);
+    box-shadow: 0 6px 12px rgba(0,0,0,0.175);
+}

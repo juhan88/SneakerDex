@@ -1,0 +1,4190 @@
+(function e(t,n,r){function s(o,u){if(!n[o]){if(!t[o]){var a=typeof require=="function"&&require;if(!u&&a)return a(o,!0);if(i)return i(o,!0);throw new Error("Cannot find module '"+o+"'")}var f=n[o]={exports:{}};t[o][0].call(f.exports,function(e){var n=t[o][1][e];return s(n?n:e)},f,f.exports,e,t,n,r)}return n[o].exports}var i=typeof require=="function"&&require;for(var o=0;o<r.length;o++)s(r[o]);return s})({1:[function(require,module,exports){
+var reportTimes = require('./timing.js');
+var extract = require('./extract.js');
+var extractFromUrl = require('./extractFromUrl.js');
+var requestCreator = require('./request.js');
+var effects = new (require('./effects.js'))();
+var utils = require('./utils.js');
+var overlayCreator = require('./overlay.js');
+var resolvePageType = require('./pageType.js');
+
+
+function createApi(context){
+  var autoLoad=true;
+  var callbacks={
+      'postrender':[],
+      'taggingsent':[],
+      'emailgiven':[],
+      'popupopened':[],
+      'popupmaximized':[],
+      'popupminimized':[],
+      'coupongiven':[],
+      'popupclosed':[],
+      'popupribbonshown':[]
+  };
+  
+  try {
+    context.isMobile = utils.isMobile(navigator.userAgent || navigator.vendor || window.opera);
+  } catch (e) {
+    context.errors.reportError(e, 'utils.isMobile');
+    context.isMobile = false;
+  }
+
+  var popupCallback = function(callbackName, event) {
+    var i, key, campaigns;
+    if (!callbacks[callbackName]) {
+      return;
+    }
+    // Map popup campaign name to its ID. To be deprecated in favor of using just the ID.
+    if (event.campaignId && context.settings && context.settings.discountPopupTriggers) {
+      for (key in context.settings.discountPopupTriggers) {
+        if (!context.settings.discountPopupTriggers.hasOwnProperty(key)) {
+          continue;
+        }
+        campaigns = context.settings.discountPopupTriggers[key];
+        for (i = 0; i < campaigns.length; i++) {
+          if (campaigns[i].campaign === event.campaignId) {
+            event.campaignId = campaigns[i].popup_id;
+            break;
+          }
+        }
+      }
+    }
+    for (i = 0; i < callbacks[callbackName].length; i++) {
+      callbacks[callbackName][i](event);
+    }
+  };
+
+  // overlay module which consolidates on-site pop-ups  
+  var overlay = overlayCreator(context, extract, popupCallback);
+
+  var internal = {
+      overlay : overlay,
+
+      extractTagging: function(optionalRootElementId) {
+        var rootElement = null;
+        if(optionalRootElementId){
+          rootElement = context.site.dom.find("#"+optionalRootElementId)[0];
+        }
+        return extract.pageTagging(context, context.siteUrlCleaned, rootElement);
+      },
+      syncCookie: function(customer) {
+        var domain = context.getCookieDomain();
+        if (customer){
+          //name,value,days,domain,path
+          context.cookie("2c.cId", customer, (24*365*4), domain, '/');
+          context.customer=customer;
+          context.errors.customer=context.customer;
+        }
+      },
+      couponGiven: function(campaign, code, couponUsed) {
+        couponUsed = !!couponUsed;
+        if(internal.sendTaggingInvoked){
+          internal.doPushData({coupon_campaign:campaign, coupon_code:code, coupon_used:couponUsed});
+        } else {
+          internal.couponCampaign = campaign;
+          internal.couponCode = code;
+          internal.couponUsed = couponUsed;
+        }
+      },
+      handleResponse: function(requestData, responseData){
+        try{
+          if (!context.pageType && responseData.pt) {
+            context.pageType = responseData.pt;
+          }
+          internal.syncCookie(responseData.customer);
+          var endEvent = { filledElements: [], unFilledElements: [] };
+          if(context.settings.live || context.nosto.window.isPreview()){
+            var dom = context.site.dom;
+            var recommendations=responseData.processedRecommendations||responseData.recommendations;
+            for(var i=0; i<requestData.el.length; i++){
+              var id = requestData.el[i];
+              var div = null;
+              if(recommendations[id]){
+                div = dom.find("#"+id)[0];
+              }
+              if(div){
+                endEvent.filledElements.push(id);
+                dom.html(div, recommendations[id]);
+                effects.show(div, context.site);
+              }else{
+                endEvent.unFilledElements.push(id);
+              }
+            }
+          }
+          if (responseData.js) {
+            // appending js script to the iframe
+            var iframeDom = context.nosto.dom;
+            iframeDom.html(iframeDom.find('body')[0], responseData.js);
+          }
+          try{
+            for(var j=0; j<callbacks.postrender.length; j++){
+              callbacks.postrender[j](endEvent);
+            }
+          }catch(e){
+            context.errors.reportError(e, 'postrender-listener');
+          }
+
+          if (overlay) {
+            overlay.setTriggers(responseData);
+          }
+
+          var nostoReady=new Date();
+          var debugVersion = context.nosto.window.getDebugVersion();
+          if(debugVersion === "v2"){
+            internal.loadToolbar("v2");
+          }else if(context.nosto.window.isPreview() || context.nosto.window.isDebug()){
+            internal.loadToolbar();
+          }
+          //report times only from valid hosts (ie. don't report values from dev environments)
+          //report only 1% of times, report on all debug requests
+          if(context.isValidHost() && (Math.random()<0.01 || context.nosto.window.isDebug())){
+            setTimeout(function(){ reportTimes(context, nostoReady); }, 10000);
+          }
+        }catch(e){
+          context.errors.reportError(e, 'handleResponse');
+          throw e;
+        }
+      },
+      loadInternalJQuery: function(callbackFn){
+        var server = context.settings.server;
+        context.nosto.loadScript(server+
+            "/public/javascripts/jquery-1.7.1.min.js",
+            function(){
+          context.nosto.window.nostoInternalJQuery=context.nosto.window.jQuery.noConflict(true);
+          callbackFn();
+        });
+      },
+      loadToolbar: function(version){
+        this.loadInternalJQuery(function(){
+          var server = context.settings.server;
+          var versionString = "";
+          if (version) {
+            versionString = "-" + version;
+          }
+          context.nosto.loadScript(server+"/public/toolbar/debugtoolbar"+versionString+".min.js");
+        });
+      },
+      loadUnsubscribePanel: function(){
+        this.loadInternalJQuery(function(){
+          var server = context.settings.server;
+          context.nosto.loadScript(server+"/public/javascripts/unsubscribe-panel.js",
+              function(){
+            context.nosto.window.blackListSettings(context.siteUrl,
+                server, context.settings.account, context.site.window);
+          });
+        });
+      },
+      doPushData: function(data,cb, attemptN){
+        //try to serialise event & push requests, give up after 1 sec 
+        attemptN = attemptN || 0;
+        if(attemptN===20){
+          context.errors.reportError(new Error('Wait max time reached'), "doPushData");
+        }
+        if(context.requests.sent.length>context.requests.received.length && attemptN<20){
+          setTimeout(function(){ internal.doPushData(data, cb, attemptN+1); }, 50);
+          return;
+        }else{
+          //mark request started
+          context.requests.sent.push("push");
+        }
+        
+        
+        var stringify = context.nosto.window.JSON.stringify;
+        var url = context.settings.server +'/ev1/push?m='+context.settings.account+'&c='+context.customer;
+
+        //what if context.customer is null?
+        var readyFn = function(responseText){
+          //mark request ended
+          context.requests.received.push("push");
+          
+          context.log(data);
+          if(responseText){
+            var responseData;
+            if(typeof responseText === "string"){
+              responseData = context.nosto.window.JSON.parse(responseText);
+            } else {
+              responseData = responseText;
+            }
+            context.log(responseData);
+            if(responseData.customer && responseData.customer!==context.customer){
+              if(context.customer){
+                //store previous customerId as device id
+                //name,value,days,domain,path
+                context.cookie("2c.dId", context.customer, (24*365*4), context.getCookieDomain(), '/');
+              }
+              internal.syncCookie(responseData.customer);
+            }
+
+            if (responseData.js) {
+              // appending js script to the iframe
+              var iframeDom = context.nosto.dom;
+              iframeDom.html(iframeDom.find('body')[0], responseData.js);
+            }
+          }
+          if(typeof cb === 'function'){
+            cb();
+          }
+        };
+
+        // Notify recovery overlay about what is being pushed to Nosto
+        // FIXME: refactor over to the new implementation of cart abandonment popup
+        // if (overlay && overlay.recoveryPopup.instance) {
+        //   if (data && data.cart) {
+        //     overlay.recoveryPopup.instance.refreshCartItems(data.cart);
+        //   }
+        //   if (data && data.customer && data.customer.email) {
+        //     if (data.customer.email.length > 0) {
+        //       overlay.recoveryPopup.instance.customerIdentified(true);
+        //     }
+        //   }
+        // }
+
+        //fallback to jsonp
+        var fallbackFn = function(error){
+          if(error){
+            context.errors.reportError(error, "CORSFallbackBegin");
+          }
+          var finalUrl=url+"&body="+encodeURIComponent(stringify(data));
+          //max get request url length is around 2083 in IE6&7&8
+          var maxLen = 2060; //reserve space for jsonp callback parameter
+          if(finalUrl.length>maxLen){
+            delete data.products;
+            finalUrl=url+"&body="+encodeURIComponent(stringify(data));
+            if(finalUrl.length>maxLen){
+              //try to reduce more, hopefully customer info has been given on previous requests
+              delete data.customer;
+              //prioritise order over cart
+              if(data.order){
+                delete data.cart;
+              }
+              finalUrl=url+"&body="+encodeURIComponent(stringify(data));
+              if(finalUrl.length>maxLen && data.order){
+                context.errors.reportError(new Error('order too long: '+stringify(data)), "pushJSONP");
+              }
+            }
+          }
+          context.nosto.jsonp(finalUrl, readyFn);
+        };
+        // IE9 fails silently in some xdr calls, fall back preemptively
+        if (context.nosto.window.navigator && context.nosto.window.navigator.userAgent &&
+            context.nosto.window.navigator.userAgent.match(/MSIE 9\./)) {
+          // Not reporting an error for this fallback use
+          fallbackFn();
+        } else {
+          context.nosto.xdr(url, 'POST', stringify(data), readyFn, fallbackFn);
+        }
+
+      },
+      mergeCustomer: function(tagged, given){
+        var i,
+        clone = {},
+        props = [ "email", "first_name", "last_name", "type", "customer_reference", "source", "source_id", "newsletter" ];
+        if (typeof tagged !== 'object' && typeof given !== 'object'){
+          return;
+        }
+        tagged = tagged || {};
+        given = given || {};
+        for (i=0;i<props.length;i++){
+          var prop = props[i];
+          if (tagged[prop]) {
+            clone[prop] = tagged[prop];
+          } else if (given[prop]) {
+            clone[prop] = given[prop];
+          }
+        }
+        return clone;
+      }
+  };
+
+
+  return {
+    internal: internal,
+    createRecommendationRequest: function(){
+      //disable auto-load on first call (makes sure autoload is invoked only once)
+      autoLoad=false;
+      return requestCreator(context);
+    },
+    setAutoLoad: function(flag){
+      autoLoad=flag;
+    },
+    isAutoLoad: function(){ return autoLoad; },
+    listen: function(phase, cb){ callbacks[phase.toLowerCase()].push(cb); },
+    loadRecommendations: function(optionalNostoElementReference){
+      var request = this.createRecommendationRequest();
+      var i, unwrappedReference;
+      var taggedData = extract.pageTagging(context, context.siteUrlCleaned);
+      context.pageType = resolvePageType(taggedData, context);
+      for(i=0; taggedData.products && i<taggedData.products.length; i++){
+        var p = taggedData.products[i];
+        if(p.product_id){
+          if(typeof optionalNostoElementReference === 'string') {
+            unwrappedReference = optionalNostoElementReference;
+          }else if(typeof optionalNostoElementReference === 'object') {
+            unwrappedReference = optionalNostoElementReference.markNostoElementClicked;
+          }
+          if(unwrappedReference){
+            request.addEvent('vp', p.product_id, unwrappedReference);
+          }else{
+            request.addEvent('vp', p.product_id);
+          }
+        }
+      }
+      request.addElements(taggedData.elements);
+      request.setOnOrderConfirmation(context.onOrderConfirmation());
+
+
+      if (taggedData.cart && taggedData.cart.items) {
+        var cartIds=[];
+        var cartTotal=0;
+        var cartSize=0;
+        var cartItems = taggedData.cart.items;
+        for (i = 0; i < cartItems.length; i++) {
+          cartIds.push(cartItems[i].product_id);
+          var qty = cartItems[i].quantity;
+          if (!qty) {
+            qty = 1;
+          }
+          var price = cartItems[i].unit_price;
+          if (price) {
+            cartTotal = cartTotal + qty*price;
+            cartSize = cartSize + qty;
+          }
+        }
+        request.addCartItems(cartIds);
+        request.addCartTotal(Math.round(cartTotal*100)/100);
+        request.addCartSize(cartSize);
+        request.addCartCookieHash(taggedData.cart.hcid);
+      }
+
+      if(taggedData.categories){
+        request.addCurrentCategories(taggedData.categories);
+      }
+
+      if (taggedData.variation){
+        request.addCurrentVariation(taggedData.variation);
+      }
+
+      if (taggedData.priceVariation){
+        request.addCurrentPriceVariation(taggedData.priceVariation);
+      }
+
+      if (taggedData.external_visit_ref){
+        request.addExternalVisitRef(taggedData.external_visit_ref);
+      }
+
+      if(taggedData.order){
+        request.addOrderData(taggedData.order);
+      }
+
+      if(taggedData.search_terms){
+        for(i=0;i<taggedData.search_terms.length;i++){
+          request.addEvent('is',taggedData.search_terms[i]);
+        }
+      }
+      request.loadRecommendations(unwrappedReference);
+    },
+    pageTagging: function(){
+      return extract.pageTagging(context, context.siteUrlCleaned);
+    },
+    //renamed function reportAddToCart to recommendedProductAddedToCart (still keeping old for backwards compatibility)
+    //The name of this function has caused lot's of confusion because people assume this is used to track cart status
+    //cart status is tracked through the cart tagging, this is just used to mark attribution when a dynamically rendered
+    //nosto element includes add-to-cart button and customer uses that to add the recommended product to their cart
+    reportAddToCart: function(cartItemId, nostoElementId){
+      this.recommendedProductAddedToCart(cartItemId, nostoElementId);
+    },
+    recommendedProductAddedToCart: function(productId, nostoElementId){
+      var request = this.createRecommendationRequest();
+      request.addEvent('vp', productId, nostoElementId);
+      request.loadRecommendations();
+    },
+    experiments: function(experiments){
+      internal.experiments=experiments;
+      for(var i=0;i<experiments.length;i++){
+        var experiment = experiments[i];
+        if (experiment.variationName) {
+          experiment.variation_name=experiment.variationName;
+          delete experiment.variationName;
+        }
+      }
+      if(internal.sendTaggingInvoked){
+        var data = {experiments:internal.experiments};
+        internal.doPushData(data);
+      }
+    },
+    customer: function(customer){
+      if (customer.email) {
+        var event = {email: customer.email, newsletter: customer.newsletter};
+        try{
+          for(var j=0; j < callbacks.emailgiven.length; j++){
+            callbacks.emailgiven[j](event);
+          }
+        }catch(e){
+          context.errors.reportError(e, 'emailgiven-listener');
+        }
+      }
+      if(internal.sendTaggingInvoked){
+
+        var data = {};
+        if (internal.taggedCustomer) {
+          data.customer_cookie_hash = internal.taggedCustomer.hcid;
+        }
+
+        if (!customer.source) {
+          customer.source = 'api';
+        }
+
+        // Override the API data with the data from tagging, unless the data source
+        // is discount-popup so that we get new email addresses through that route
+        if (customer.source === 'discount-popup') {
+          customer = internal.mergeCustomer(customer, internal.taggedCustomer);
+        } else {
+          customer = internal.mergeCustomer(internal.taggedCustomer, customer);
+        }
+
+        data.customer = customer;
+        internal.doPushData(data);
+      } else {
+        customer.type='loggedin';
+        internal.customer = customer;
+      }
+    },
+    orderSubmitted: function(method){
+      var img = new Image(),
+      customerId = context.customer,
+      url = context.settings.server + "/jsorder1?m=" + context.settings.account + "&c=" + customerId;
+      if (method) {
+        url += "&p=" + encodeURIComponent(method);
+      }
+      if (customerId && context.settings.account) {
+        img.src = url;
+      }
+    },
+    paymentMethodChosen: function(method){
+      var img = new Image(),
+      customerId = context.customer;
+      if (method && customerId && context.settings.account) {
+        var pm = encodeURIComponent(method);
+        img.src = context.settings.server + "/jspmc1?m=" + context.settings.account + "&c=" + customerId + "&p=" + pm;
+      }
+    },
+    popupCampaigns: function() {
+      var i, compactList = [], campaigns = overlay.campaignList();
+      for (i = 0; i < campaigns.length; i++) {
+        compactList.push({
+          id: campaigns[i].popup_id,
+          name: campaigns[i].campaign,
+          type: campaigns[i].type
+        });
+      }
+      return compactList;
+    },
+
+    openPopup: function(campaign, options) {
+      var i, error = overlay.openPopup(campaign, options);
+      if (error) {
+        popupCallback("popupopened", {
+          error: error,
+          campaignId: campaign,
+          type: "api"
+        });
+      }
+    },
+
+    enablePopup: function(campaign) {
+      overlay.enablePopup(campaign);
+    },
+
+    disablePopup: function(campaign) {
+      overlay.disablePopup(campaign);
+    },
+
+    sendTagging: function(optionalRootElementId,ref,opts){
+      try{
+        var taggedData = internal.extractTagging(optionalRootElementId);
+
+        var stringify = context.nosto.window.JSON.stringify;
+        var parse = context.nosto.window.JSON.parse;
+        var clonedData = parse(stringify(taggedData));
+        //we don't need these for push updates, deleting to make the payload/url smaller
+        delete clonedData.elements;
+        delete clonedData.categories;
+        delete clonedData.variation;
+        delete clonedData.priceVariation;
+        delete clonedData.pluginVersion;
+        delete clonedData.search_terms;
+
+        // If there is customer information in tagging, override
+        // the customer information set by the API customer accessor
+        // with the data from tagging.
+        internal.taggedCustomer = clonedData.customer;
+        clonedData.customer = internal.mergeCustomer(clonedData.customer, internal.customer);
+
+        if (internal.taggedCustomer) {
+          clonedData.customer_cookie_hash = internal.taggedCustomer.hcid;
+        }
+
+        if (clonedData.cart) {
+          clonedData.cart_cookie_hash = clonedData.cart.hcid;
+        }
+
+        //replace the cart object with the cart items
+        if (clonedData.cart) {
+          clonedData.cart = clonedData.cart.items;
+        }
+
+        if (clonedData.order) {
+          clonedData.order_cookie_hash = clonedData.order.hcid;
+        }
+
+        //Remove the cookie hash from the order if set
+        if (clonedData.order && clonedData.order.hcid) {
+          delete clonedData.order.hcid;
+        }
+
+        clonedData.coupon_campaign = internal.couponCampaign;
+        clonedData.coupon_code = internal.couponCode;
+        clonedData.coupon_used = !!internal.couponUsed;
+
+        if (clonedData.page_type) {
+          clonedData.page_type_tagging = true;
+        }
+        if (context.pageType) {
+          clonedData.page_type = context.pageType;
+        }
+
+        if (!opts || opts.onOrderConfirmation === undefined) {
+          clonedData.on_order_confirmation = context.onOrderConfirmation();
+        } else {
+          clonedData.on_order_confirmation = opts.onOrderConfirmation;
+        }
+
+        if(internal.experiments){
+          clonedData.experiments = internal.experiments;
+        }
+
+        // Do we have product views? If not, set the url field
+        var haveProductViews = clonedData.products!==undefined && clonedData.products.length>0;
+        if(!haveProductViews){
+          clonedData.url = context.siteUrlCleaned;
+        }
+
+        var emailAddressUrlParamName = context.settings.emailAddressUrlParamName || "";
+        var emailAddressFromURL;
+        if (context.settings.collectEmailFromURL && context.settings.collectEmailFromURL === true && context.settings.emailAddressUrlParamName.length > 0) {
+          emailAddressFromURL = context.siteUrl.queryKey[emailAddressUrlParamName];
+          if (!clonedData.customer && emailAddressFromURL && emailAddressFromURL.length > 0) {
+            clonedData.customer = {
+                "type" : "loggedin",
+                "email" : emailAddressFromURL,
+                "source" : "url"
+            };
+          }
+        }
+
+        // Extract nosto ref if present
+        if(!context.nosto.window.isPreview()){
+          if(ref){
+            clonedData.ref = ref;
+          }else{
+            var recRef=extractFromUrl.recommendationRef(context.siteUrl, context.settings.nostoRefParam);
+            if(recRef!==undefined){
+              clonedData.ref = recRef;
+              if (recRef && (recRef.indexOf('$') === 0 || recRef.indexOf('.') > -1)) {
+                context.errors.reportError(new Error("Illegal reference " + recRef + " on " + document.location.href), "sendTagging");
+              }
+            }
+          }
+        }
+
+        // Add referer
+        clonedData.referrer=context.site.window.document.referrer;
+        // Add campaign landing url
+        if(context.siteUrl.queryKey.utm_campaign){
+            clonedData.ec_url=context.site.window.document.location.href;
+        }
+
+        internal.doPushData(clonedData, function() {
+          try{
+            for(var i=0; i<callbacks.taggingsent.length; i++){
+              callbacks.taggingsent[i]();
+            }
+          }catch(e){
+            context.errors.reportError(e, 'taggingsent-listener');
+          }
+        });
+        internal.sendTaggingInvoked=true;
+      }catch(e){
+        context.errors.reportError(e, 'sendTagging');
+        throw e;
+      }
+    }
+  };
+}
+
+module.exports=createApi;
+
+},{"./effects.js":11,"./extract.js":13,"./extractFromUrl.js":15,"./overlay.js":20,"./pageType.js":21,"./request.js":23,"./timing.js":25,"./utils.js":26}],2:[function(require,module,exports){
+var parseUri = require('./parseuri.js');
+
+function cleanUrl(url, recommendationRefParamName){
+  return cleanParsedUrl(parseUri(url),recommendationRefParamName);
+}
+
+function cleanParsedUrl(parsedUrl, recommendationRefParamName){
+  var val = parsedUrl.queryKey[recommendationRefParamName];
+  if(val===undefined){
+    return parsedUrl.source;
+  }else{
+    var nostoRefParam = recommendationRefParamName+"="+val;
+    //in the middle
+    if(parsedUrl.source.indexOf("&"+nostoRefParam)>=0){
+        return parsedUrl.source.replace("&"+nostoRefParam,'');
+    }
+    //first with multiple params
+    if(parsedUrl.source.indexOf("?"+nostoRefParam+"&")>=0){
+        return parsedUrl.source.replace("?"+nostoRefParam+"&",'?');
+    }
+    //first as only param
+    if(parsedUrl.source.indexOf("?"+nostoRefParam)>=0){
+        return parsedUrl.source.replace("?"+nostoRefParam,'');
+    }
+  }
+}
+
+module.exports={
+        "cleanUrl":cleanUrl,
+        "cleanParsedUrl":cleanParsedUrl
+};
+},{"./parseuri.js":22}],3:[function(require,module,exports){
+var iframeFactory = require('./fifloader.js');
+var cookieFactory = require('./cookie.js');
+var extractFromUrl = require('./extractFromUrl.js');
+var parseUri = require('./parseuri.js');
+var Selector = require('./selector.js');
+var domReadyCreator = require('./domready.js');
+var loadersCreator = require('./loaders.js');
+var errorHandler = require('./errorHandler.js');
+var utils = require('./utils.js');
+var cleanUri = require('./cleanuri.js');
+
+
+function windowTools(win, scriptLoaderWindow, errors){
+  var loaders = loadersCreator(scriptLoaderWindow, errors);
+  var selector=new Selector(win.document, loaders, errors, scriptLoaderWindow.doc);
+  return {
+    'window': win,
+    'loadScript':loaders.loadScript,
+    'jsonp':loaders.jsonp,
+    'loadOnce':loaders.loadOnce,
+    'xdr':loaders.xdr,
+    'dom':selector,
+    'domReady':domReadyCreator(win)
+  };
+}
+
+
+function getSettings(){
+  //this following string should be replaced by server with settings
+  var settings = {"server":"//connect.nosto.com","recoveryPopupEnabled":false,"discountPopupTriggers":{"abandonedCart":[{"popup_id":"56654a9a6ca9e1ebfe17ecb9","campaign":"Follow Up Abandoned Carts","enabled":false}]},"site":"http://www.flightclub.com","trackingTypes":["api","email","imgrec"],"subDomain":"","searchQueryParam":"q","defaultCurrencyCode":"USD","anyDomain":true,"nostoRefParam":"nosto","account":"h239k2p6","live":true};
+  if(typeof settings !== 'object'){
+    settings={};
+  }
+
+  // Name of the source parameter which defines
+  // the attribution type. Hard coded for now since we
+  // assume that this will not change.
+  settings.sourceParameterName = "nosto_source";
+
+  return settings;
+}
+
+function determineWindows(evalWindow){
+  // if the store is in an iframe already and nosto is included directly
+  // (without the embed) then referring window.parent can throw security
+  // exception for cross-origin reference
+  try{
+    // If evalWindow has a parent that isn't a reference to itself, and has the nostojs stub, we assume
+    // that evalWindow is the nosto iframe created by the embed script and that the parent window is the
+    // store window.
+    if(evalWindow.parent && evalWindow.parent !== evalWindow && (evalWindow.parent.embedjs || evalWindow.parent.nostojs)){
+      return {
+        site:evalWindow.parent,
+        nosto:evalWindow
+      }; 
+    }
+  }catch(e){
+    /* ignore the possible security exception, then we'll continue to create the iframe for us */
+  }
+  //create nostoIframe
+  var nostoWindow = iframeFactory(evalWindow, "js-iframe-async").contentWindow;
+  return {
+    site:evalWindow,
+    nosto:nostoWindow
+  };
+}
+
+function modeDetector(siteUrl, cookie){
+  function getMode(modeParameter, modeCookie){
+    var preview = siteUrl.queryKey[modeParameter] || cookie(modeCookie);
+    //console.log(siteUrl.queryKey[modeParameter], cookie(modeCookie), preview);
+    if(preview==="v2"){
+      cookie(modeCookie, "v2", 1, null, '/');
+      return "v2";
+    }else if(preview==="true") {
+      cookie(modeCookie, "true", 1, null, '/');
+      return "v1";
+    }else{
+      cookie(modeCookie, null, -1, null, '/');
+      return false;
+    }
+  }
+  return {
+    isPreview: function(){ return getMode('nostopreview','nostoprev')||getMode('nostodebug','nostodev');},
+    isDebug: function(){ return getMode('nostodebug','nostodev'); },
+    getDebugVersion: function(){ return getMode('nostodebug','nostodev'); },
+    setPreview: function(optArg){
+      if(arguments.length===0 || optArg){
+        cookie('nostoprev', "true", 1, null, '/');
+      }else{
+        cookie('nostoprev', null, -1, null, '/');
+      }
+    }
+  };
+}
+
+
+function sameHost(currentHost, targetHost, subDomain){
+  if(currentHost===targetHost){ return true; }
+  if(subDomain){
+    return utils.endsWith(currentHost, subDomain);
+  }
+  return false;
+}
+
+function createContext(win, namespace){
+  var context={};
+  context.namespace = namespace || 'nosto';
+  context.created=new Date();
+  context.settings = getSettings();
+
+
+
+  var w = determineWindows(win);
+  if(w.site.nostojs){
+    context.loader=w.site.nostojs;
+    context.initOptions = context.loader.o;
+  }
+  if(!context.initOptions){
+    context.initOptions = {};
+  }
+
+  context.errors = errorHandler(w.nosto, context.settings.account, context.settings.server);
+  try{
+    context.log=function(){
+      w.nosto.debugLog = w.nosto.debugLog || [];
+      w.nosto.debugLog.push(arguments[0]);
+      return w.nosto.isDebug() && window.console && console.log &&
+        Function.apply.call(console.log, console, arguments);
+    };
+
+    context.cookie=cookieFactory(w.nosto.document);
+    context.requests={sent:[], received:[]};
+    context.siteUrl=parseUri(w.site.document.location.href);
+    context.customer=context.cookie('2c.cId');
+    context.errors.customer=context.customer;
+    context.referer=parseUri(w.site.document.referrer);
+    context.siteUrlCleaned=cleanUri.cleanParsedUrl(context.siteUrl, context.settings.nostoRefParam);
+    context.searchQuery= extractFromUrl.searchQuery(context.siteUrl, context.settings.searchQueryParam);
+    context.errors.siteUrl = context.siteUrl.source;
+    context.onOrderConfirmation=function(){
+      var i, ocp, pathAndQuery;
+      if(!context.siteUrl.path || !context.settings.orderConfPaths){ return false; }
+      ocp = context.settings.orderConfPaths;
+      for(i=0; i<ocp.length;i++){
+        if (!ocp[i]) { continue; }
+        pathAndQuery = ocp[i].split("?", 2);
+        if(utils.trim(context.siteUrl.path)===utils.trim(pathAndQuery[0])){
+          if (pathAndQuery.length > 1) {
+            // test the query part as well
+            if (utils.trim(context.siteUrl.query||'')===utils.trim(pathAndQuery[1])) {
+              return true;
+            } else {
+              return false;
+            }
+          } else {
+            // Paths matching is enough
+            return true;
+          }
+        }
+      }
+      return false;
+    };
+    
+    /* returns true if the current host matches something the merchant has listed as production host,
+     * false means a dev environment of some kind. In those cases preview mode will still activate,
+     * requests will be served, but request data won't be saved to Nosto.
+     */
+    context.isValidHost=function(optionalHost){
+        var host = optionalHost || context.siteUrl.host;
+        if(context.settings.anyDomain)
+            return true;
+        if(sameHost(host, parseUri(context.settings.site).host, context.settings.subDomain))
+            return true;
+        if(context.settings.extraHosts){
+            for(var i=0; i<context.settings.extraHosts.length; i++){
+                if( utils.endsWith(host, parseUri(context.settings.extraHosts[i]).host) )
+                    return true;
+            }
+        }
+        return false;
+    };
+    context.getCookieDomain= function(optionalHost){
+        var host = optionalHost || context.siteUrl.host;
+        if(context.settings.subDomain && utils.endsWith(host, context.settings.subDomain)){
+            return "."+context.settings.subDomain;
+        }
+        if(context.settings.extraHosts){
+            for(var i=0; i<context.settings.extraHosts.length; i++){
+                var eh = parseUri(context.settings.extraHosts[i]).host;
+                if( utils.endsWith(host, eh) && host.length>=eh.length ){
+                    return "."+eh;
+                }
+            }
+        }
+        return null;
+    };
+
+
+    context.site=windowTools(w.site, w.nosto, context.errors);
+    context.nosto=windowTools(w.nosto, w.nosto, context.errors);
+
+
+
+    var modes = modeDetector(context.siteUrl, context.cookie);
+
+
+
+    w.nosto.isDebug=modes.isDebug;
+    w.nosto.getDebugVersion=modes.getDebugVersion;
+    w.nosto.isPreview=modes.isPreview;
+    w.nosto.setPreview=modes.setPreview;
+
+    context.active=modes.isDebug() || modes.isPreview() || context.isValidHost();
+
+    w.nosto.context=context;
+    w.nosto._targetWindow=w.site;
+    w.site[context.namespace]=w.nosto;
+  }catch(e){
+    context.errors.reportError(e, "createContext");
+    throw e;
+  }
+  return context;
+}
+
+module.exports = createContext;
+},{"./cleanuri.js":2,"./cookie.js":4,"./domready.js":10,"./errorHandler.js":12,"./extractFromUrl.js":15,"./fifloader.js":16,"./loaders.js":18,"./parseuri.js":22,"./selector.js":24,"./utils.js":26}],4:[function(require,module,exports){
+
+/*
+Read,Write,Erase cookies, adapted from the trusted Quirksmode:
+http://www.quirksmode.org/js/cookies.html
+
+Exports a simple interface:
+ var cookieCreator = require('./cookie.js'); 
+ var cookie = cookieCreator(document);
+ var val = cookie('name'); //read
+ cookie('name','val', hours, domain, path); //write
+ cookie('name',null, hours, domain, path); //erase
+ */
+
+ function create(doc){
+
+  function createCookie(name,value,hours,domain,path) {
+    doCreate(name,value,hours,domain,path);
+    // Check for shadowing cookies
+    if(readCookie(name)!==value){
+      clearShadowingCookies(name,value,domain,path,doc.location.hostname);
+    }
+  }
+
+  function readCookie(name) {
+    var nameEQ = name + "=";
+    var ca = doc.cookie.split(';');
+    for(var i=0;i < ca.length;i++) {
+      var c = ca[i];
+      while (c.charAt(0)===' ') c = c.substring(1,c.length);
+      if (c.indexOf(nameEQ) === 0) return c.substring(nameEQ.length,c.length);
+    }
+    return null;
+  }
+
+  function doCreate(name,value,hours,domain,path) {
+    var t = [];
+    t.push([name,value]);
+    if(value === null){
+      hours=-1;
+    }
+    if(hours){
+      //Safari requires toGMTString for cookies
+      //http://forum.slicehost.com/index.php?p=/discussion/929/are-you-setting-cookies-in-javascript-a-fix-for-leopards-safari/p1
+      t.push(['expires',  new Date(new Date().getTime()+ (hours*60*60*1000)).toGMTString()]);
+    }
+    if(domain){
+      t.push(['domain',domain]);
+    }
+    if(path){
+      t.push(['path',path]);
+    }
+    var s = '';
+    for(var i=0; i<t.length; i++){
+      s+=t[i].join('=')+'; ';
+    }
+    doc.cookie=s;
+  }
+
+  function clearShadowingCookies(name,value,domain,path,currentDomain){
+    var shadowingDomains = getShadowingDomains(currentDomain);
+    if(!domain){
+      domain = null;
+    }else if(domain.indexOf(".")!==0){
+      domain="."+domain;
+    }
+    var i;
+    for (i = 0; i < shadowingDomains.length; ++i) {
+      if(shadowingDomains[i]!==domain){
+        doCreate(name,null,null,shadowingDomains[i],path);
+        if(readCookie(name)===value){
+          break;
+        }
+      }
+    }
+  }
+  
+  function getShadowingDomains(domain){
+    // Generates the following possible shadowing domains
+    // app.mobi.example.com  -> [app.mobi.example.com, mobi.example.com, example.com ]
+    var domains=[];
+    domains.push(null);
+    
+    var parts = domain.split('.');
+    
+    while(parts.length>1){
+      var curDomain = parts.join('.'); 
+      domains.push("."+curDomain); 
+      parts.shift(); 
+    } 
+    return domains;
+  }
+  
+  return function(){
+    var args=arguments;
+    if(args.length===1){
+      return readCookie(args[0]);
+    }else{
+      createCookie.apply(this,args);
+    }
+  };
+
+
+}
+
+module.exports=create;
+
+
+},{}],5:[function(require,module,exports){
+function OpenChain(win) {
+  this.win = win;
+  this.listeners = [];
+}
+
+function arrayIndexOf(arr, obj, start) {
+  start = start || 0;
+  for (var i = start, j = arr.length; i < j; i++) {
+    if (arr[i] === obj) {
+      return i;
+    }
+  }
+  return -1;
+}
+
+OpenChain.prototype.register = function(okToOpen, config, cb, campaignId, condition, response, effect, trigger) {
+  var linkCallback, linkOkToOpen, nextLink, listener, links = config.links || [];
+  if (!links || links.length === 0) {
+    linkOkToOpen = function() {
+      return okToOpen(campaignId, condition, response);
+    };
+    linkCallback = function() {
+      if (linkOkToOpen()) {
+        cb(campaignId, response, effect, trigger);
+      }
+    };
+  } else {
+    nextLink = links.shift();
+    config.links = links;
+    linkCallback = function() {
+      nextLink.register(okToOpen, config, cb, campaignId, condition, response, effect, trigger);
+    };
+  }
+
+  listener = {
+    okToOpen: linkOkToOpen,
+    config: config,
+    cb: linkCallback
+  };
+  this.listeners.push(listener);
+  this.setup(listener);
+};
+
+OpenChain.prototype.deregister = function(listenerIndex) {
+  this.listeners.splice(listenerIndex, 1);
+  if (this.listeners.length === 0) {
+    this.teardown();
+  }
+};
+
+OpenChain.prototype.setup = function(listener) {
+  listener.cb();
+  if (this.listeners.length > 0) {
+    this.deregister(arrayIndexOf(this.listeners, listener));
+  }
+};
+
+OpenChain.prototype.teardown = function() {
+  // abstract
+};
+
+module.exports = OpenChain;
+},{}],6:[function(require,module,exports){
+var OpenChain = require('./OpenChain.js');
+
+function AfterDelayLink(win) {
+  this.constructor(win);
+}
+
+AfterDelayLink.prototype = new OpenChain();
+AfterDelayLink.prototype.constructor = OpenChain;
+
+AfterDelayLink.prototype.setup = function(listener) {
+  this.win.setTimeout(listener.cb, listener.config.delay || 0);
+};
+
+module.exports = AfterDelayLink;
+},{"./OpenChain.js":5}],7:[function(require,module,exports){
+var OpenChain = require('./OpenChain.js');
+
+function AfterScrollLink(win) {
+  this.constructor(win);
+  this.scrollTimeout = null;
+}
+AfterScrollLink.prototype = new OpenChain();
+AfterScrollLink.prototype.constructor = OpenChain;
+
+AfterScrollLink.prototype.scrollFinished = function() {
+  var scrollMin, scrolled = Math.abs(this.yOffset - this.getY());
+  for (var i = 0; i < this.listeners.length; i++) {
+    scrollMin = this.listeners[i].config.scroll || 100;
+    if (scrollMin > scrolled || (this.listeners[i].okToOpen && !this.listeners[i].okToOpen())) {
+      continue;
+    }
+    this.listeners[i].cb();
+    this.deregister(i);
+  }
+};
+
+AfterScrollLink.prototype.handleScroll = function(delay) {
+  var self = this;
+  if (this.scrollTimeout) {
+    this.win.clearTimeout(this.scrollTimeout);
+  }
+  this.scrollTimeout = this.win.setTimeout(function() {
+    self.scrollFinished();
+  }, delay);
+};
+
+AfterScrollLink.prototype.getY = function() {
+  // IE compatibility
+  // https://developer.mozilla.org/en-US/docs/Web/API/Window/scrollY
+  if (this.supportPageOffset) {
+    return this.win.pageYOffset;
+  } else {
+    return this.isCSS1Compat ? this.win.document.documentElement.scrollTop : document.body.scrollTop;
+  }
+};
+
+AfterScrollLink.prototype.setup = function(listener) {
+  var self = this;
+  var afterScrollDelay = 250;
+  if (this.listeners.length === 1) {
+
+    // IE compatibility
+    // https://developer.mozilla.org/en-US/docs/Web/API/Window/scrollY
+    this.supportPageOffset = this.win.pageXOffset !== undefined;
+    this.isCSS1Compat = ((this.win.document.compatMode || "") === "CSS1Compat");
+    this.yOffset = this.getY();
+
+    this.handleScrollClos = function() {
+      self.handleScroll(afterScrollDelay);
+    };
+    if (this.win.addEventListener) {
+      this.win.addEventListener("scroll", this.handleScrollClos, false);
+    } else if (this.win.attachEvent) {
+      // Legacy support for attach events IE8 and lower. Support is dropped in IE11
+      // http://msdn.microsoft.com/en-us/library/ie/ms536343(v=vs.85).aspx (27.8.2014),
+      this.win.attachEvent("onscroll", this.handleScrollClos);
+    }
+  }
+};
+
+AfterScrollLink.prototype.teardown = function() {
+  if (this.win.removeEventListener && this.handleScrollClos) {
+    this.win.removeEventListener("scroll", this.handleScrollClos, false);
+  } else if (this.win.detachEvent) {
+    // Legacy support for attach events IE8 and lower. Support is dropped in IE11
+    // http://msdn.microsoft.com/en-us/library/ie/ms536343(v=vs.85).aspx (27.8.2014),
+    this.win.detachEevent("onscroll", this.handleScrollClos);
+  }
+  this.handleScrollClos = null;
+};
+
+module.exports = AfterScrollLink;
+},{"./OpenChain.js":5}],8:[function(require,module,exports){
+/*******************************************************************************
+ * Copyright (c) 2016 Nosto Solutions Ltd All Rights Reserved.
+ *
+ * This software is the confidential and proprietary information of
+ * Nosto Solutions Ltd ("Confidential Information"). You shall not
+ * disclose such Confidential Information and shall use it only in
+ * accordance with the terms of the agreement you entered into with
+ * Nosto Solutions Ltd.
+ ******************************************************************************/
+
+// Module that is used to display discount popups
+
+var domReadyCreator = require('../domready.js');
+var utils = require('../utils.js');
+
+// @params object Additional parameters
+// @context object Nosto context object (see recoveryFeature.js for examples on how the context is used)
+function discountPopup(context, extract, lookupPopupName, callback) {
+    // Internal fields
+
+    // Internal log, enable if you want to debug the feature in more
+    // detail. Add "console.log(logMessage)" to enable logging (or some
+    // other logging facility).
+    //
+    function log(logMessage) {
+      // console.log("Discount popup ->", logMessage);
+    }
+
+    // Preview the discount popup
+    function preview(campaignId, effect) {
+      campaignId = campaignId || "";
+      internal.showPopup({campaignId: campaignId, effect: effect || {}, trigger: "api", preview: true });
+    }
+
+    function isCampaignId(str) {
+      return str.length === 24 && str.match(/^[0-9a-f]+$/);
+    }
+
+    function lookupPopupId(campaignName) {
+      var triggerType, i, triggers = context.settings.discountPopupTriggers || {};
+      for (triggerType in triggers) {
+        if (!triggers.hasOwnProperty(triggerType)) {
+          continue;
+        }
+        for (i = 0; i < triggers[triggerType].length; i++) {
+          if (triggers[triggerType][i].campaign === campaignName && triggers[triggerType][i].popup_id) {
+            return triggers[triggerType][i].popup_id;
+          }
+        }
+      }
+      return null;
+    }
+
+    function readCookie(campaignId) {
+      try {
+        var parsed = null, i, key, str, decodedName, resolvedId, migratedCookie = {}, migrated = [], cookie = context.cookie("2c.dc");
+        if (!cookie) {
+          // Brand new cookie
+          return {};
+        }
+        try {
+          parsed = context.nosto.window.JSON.parse(cookie);
+        } catch (e) {
+          // fall through
+        }
+        if (!parsed) {
+          return {};
+        }
+        // Migrate campaign names to campaign IDs
+        for (key in parsed) {
+          if (!parsed.hasOwnProperty(key)) {
+            continue;
+          }
+          resolvedId = null;
+          if (!isCampaignId(key)) {
+            try {
+              decodedName = decodeURIComponent(key);
+              resolvedId = lookupPopupId(decodedName);
+            } catch (e) {
+              // fall through
+            }
+          }
+          if (resolvedId) {
+            migratedCookie[resolvedId] = parsed[key];
+            migrated.push(decodedName);
+          } else {
+            migratedCookie[key] = parsed[key];
+          }
+        }
+        if (migrated.length > 0) {
+          str = context.nosto.window.JSON.stringify(migratedCookie);
+          context.cookie("2c.dc", str, (24*365*4), null, "/");
+          if (migrated[0]) {
+            // Increase the stat once per customer, not for each campaign.
+            // We want to observe the frequency of these event per customer, not the
+            // total amount of migrated campaign keys
+            internal.updateStatFn(decodedName, "cookieMigrated");
+          }
+        }
+        // Support campaign name input for now
+        if (campaignId && !isCampaignId(campaignId)) {
+          campaignId = lookupPopupId(campaignId);
+        }
+        if (campaignId && migratedCookie[campaignId]) {
+          return migratedCookie[campaignId];
+        } else {
+          return parsed;
+        }
+      } catch (e) {
+        context.errors.reportError(e, 'readCookie');
+      }
+    }
+
+    function writeCookie(campaignId, key, val) {
+      // Support campaign name input for now
+      if (!isCampaignId(campaignId)) {
+        campaignId = lookupPopupId(campaignId);
+      }
+      try {
+        var cookie = readCookie();
+        if (!cookie[campaignId]) {
+          cookie[campaignId] = {};
+        }
+        if (key) {
+          cookie[campaignId][key] = val;
+        } else {
+          // Clear
+          cookie[campaignId] = {};
+        }
+        var str = context.nosto.window.JSON.stringify(cookie);
+        context.cookie("2c.dc", str, (24*365*4), null, "/");
+      } catch(e) {
+        context.errors.reportError(e, 'writeCookie');
+      }
+    }
+
+    function done(campaignId) {
+      writeCookie(campaignId, "coupon", null);
+      writeCookie(campaignId, "state", "closed");
+    }
+
+    function forAllCampaigns(cookieCheckF, campaignF) {
+      var i, effect, condition, triggerType, campaignId, campaignName, cookie = readCookie();
+      for (campaignId in cookie) {
+        if (!cookie.hasOwnProperty(campaignId)) {
+          continue;
+        }
+        if (cookieCheckF(cookie[campaignId])) {
+          for (triggerType in context.settings.discountPopupTriggers) {
+            if (!context.settings.discountPopupTriggers.hasOwnProperty(triggerType)) {
+              continue;
+            }
+            for (i = 0; i < context.settings.discountPopupTriggers[triggerType].length; i++) {
+              if (context.settings.discountPopupTriggers[triggerType][i].popup_id === campaignId && context.settings.discountPopupTriggers[triggerType][i].enabled !== false) {
+                campaignName = context.settings.discountPopupTriggers[triggerType][i].campaign;
+                effect = context.settings.discountPopupTriggers[triggerType][i].effect;
+                condition = context.settings.discountPopupTriggers[triggerType][i].condition;
+                break;
+              }
+            }
+            if (effect) {
+              break;
+            }
+          }
+          // Pass back campaign names for now
+          if (campaignName && campaignF(campaignName, effect, condition)) {
+            return;
+          }
+        }
+      }
+    }
+
+    function stampOnCheckoutPage() {
+      try {
+        function onCheckout(cookie) {
+          return cookie.checkout;
+        }
+        function stamp(campaignId) {
+          internal.updateStatFn(campaignId, "checkoutredirect");
+          writeCookie(campaignId, "checkout", false);
+        }
+        forAllCampaigns(onCheckout, stamp);
+      } catch(e) {
+        context.errors.reportError(e, 'stampOnCheckoutPage');
+      }
+    }
+
+    function openMinimized() {
+      var show, orderSeen = false;
+      function isShown(cookie) {
+        return cookie.state === "shown";
+      }
+      try {
+        // If we see order tagging, assume that order has been made
+        // and coupon isn't to be shown.
+        if (extract.findOrder(context.site.dom)) {
+          orderSeen = true;
+        }
+        show = function(campaignId, effect, condition) {
+          if (condition && ((condition.hide_on_desktop && !context.isMobile) || (condition.hide_on_mobile && context.isMobile))) {
+            return false;
+          }
+          if (orderSeen) {
+            done(campaignId);
+          } else {
+            if (effect) {
+              delete effect.fadein_min;
+            }
+            internal.showPopup({campaignId: campaignId, effect: effect});
+          }
+          return true;
+        };
+        forAllCampaigns(isShown, show);
+      } catch(e) {
+        context.errors.reportError(e, 'openMinimized');
+      }
+    }
+
+  function open(campaignId, response, effect, trigger) {
+      var cart = { total: 0, size: 0 };
+      if (response && response.ct) {
+        cart.total = response.ct;
+      }
+      if (response && response.cs) {
+        cart.size = response.cs;
+      }
+      // push usage statistics
+      internal.updateStatFn(campaignId, "triggered");
+    internal.showPopup({campaignId: campaignId, cart: cart, effect: effect, trigger: trigger});
+  }
+
+    function containsAny(col1, col2) {
+      if (col1 && col2) {
+        for (var i = 0; i < col1.length; i++) {
+          for (var j = 0; j < col2.length; j++) {
+            if (typeof(col1[i]) === 'string' && typeof(col2[j]) === 'string' && col1[i].toLowerCase() === col2[j].toLowerCase()) {
+              return true;
+            }
+          }
+        }
+      }
+      return false;
+    }
+
+    function containsAnyCategory(col1, col2) {
+      if (col1 && col2) {
+        for (var i = 0; i < col1.length; i++) {
+          for (var j = 0; j < col2.length; j++) {
+            if (utils.isSubcategoryOf(col2[j], col1[i])) {
+              return true;
+            }
+          }
+        }
+      }
+      return false;
+    }
+
+    function notEmpty(arr) {
+      return arr && arr.length > 0;
+    }
+
+    // True if arrays are not empty and arr1 begins with or equals to arr2
+    function startsWithArray(arr1, arr2) {
+        for (var i = 0; i < arr2.length; i++) {
+            if (arr1.length - 1 < i || arr1[i] !== arr2[i]) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    function startsWithAnyArray(array, arrays) {
+        if (!notEmpty(array)) {
+            return false;
+        }
+        for (var i = 0; i < arrays.length; i++) {
+            if (!notEmpty(arrays[i])) {
+                continue;
+            }
+            if (startsWithArray(array, arrays[i])) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    function evaluateCondition(c, response) {
+      try {
+        // handle enabled flags
+        if (c.enabledInJs === false || (c.enabled === false && !c.enabledInJs)) {
+          return false;
+        }
+
+        // extract tagging metadata
+        var tagging = extract.pageTagging(context, context.siteUrlCleaned, null);
+        var categories = tagging.categories || [];
+        var tags = [];
+        var brands = [];
+        var urls = [context.siteUrlCleaned];
+        for (var i = 0; i < tagging.products.length; i++) {
+          brands.push(tagging.products[i].brand);
+          if (tagging.products[i].category)
+            categories.push.apply(categories, tagging.products[i].category);
+          if (tagging.products[i].tags1)
+            tags.push.apply(tags, tagging.products[i].tags1);
+          if (tagging.products[i].tags2)
+            tags.push.apply(tags, tagging.products[i].tags2);
+          if (tagging.products[i].tags3)
+            tags.push.apply(tags, tagging.products[i].tags3);
+        }
+
+        // evaluate conditions
+        var result = true;
+        if ((c.hide_on_desktop && !context.isMobile) || (c.hide_on_mobile && context.isMobile)) {
+          result = false;
+        }
+        if (notEmpty(c.categories) && !containsAnyCategory(c.categories, categories)) {
+          result = false;
+        }
+        if (notEmpty(c.exc_categories) && containsAnyCategory(c.exc_categories, categories)) {
+          result = false;
+        }
+        if (notEmpty(c.tags) && !containsAny(c.tags, tags)) {
+          result = false;
+        }
+        if (notEmpty(c.exc_tags) && containsAny(c.exc_tags, tags)) {
+          result = false;
+        }
+        if (notEmpty(c.brands) && !containsAny(c.brands, brands)) {
+          result = false;
+        }
+        if (notEmpty(c.exc_brands) && containsAny(c.exc_brands, brands)) {
+          result = false;
+        }
+        if (notEmpty(c.urls) && !containsAny(c.urls, urls)) {
+          result = false;
+        }
+        if (notEmpty(c.exc_urls) && containsAny(c.exc_urls, urls)) {
+          result = false;
+        }
+        if (c.min_cart_value && (!response.ct || response.ct < c.min_cart_value)) {
+          result = false;
+        }
+        if (c.min_cart_size && (!response.cs || response.cs < c.min_cart_size)) {
+          result = false;
+        }
+        if (c.max_cart_value && response.ct > c.max_cart_value) {
+          result = false;
+        }
+        if (c.max_cart_size && response.cs > c.max_cart_size) {
+          result = false;
+        }
+        if (c.min_page_views && response.pv < c.min_page_views) {
+          result = false;
+        }
+        if (c.max_page_views && response.pv > c.max_page_views) {
+          result = false;
+        }
+        if (notEmpty(c.locations) && !startsWithAnyArray(response.gl, c.locations)) {
+            result = false;
+        }
+        if (notEmpty(c.exc_locations) && startsWithAnyArray(response.gl, c.exc_locations)) {
+          result = false;
+        }
+        if (notEmpty(c.page_types) && !containsAny(c.page_types, [context.pageType])) {
+          result = false;
+        }
+        if (notEmpty(c.exc_page_types) && containsAny(c.exc_page_types, [context.pageType])) {
+          result = false;
+        }
+
+        return result;
+      } catch(e) {
+        context.errors.reportError(e, 'evaluateCondition');
+        return false;
+      }
+
+    }
+
+    function okToOpen(campaignId, condition, responseData) {
+      return !openCheck(campaignId, condition, responseData);
+    }
+
+    // Return null if OK to open, otherwise return an error message
+    function openCheck(campaignId, condition, responseData) {
+      if (context.popupShown) {
+        return "Another pop-up is being shown, campaignId: " + context.popupShown;
+      }
+      if (readCookie(campaignId).state === 'closed') {
+        // don't show pop-up because it's already been closed by a customer
+        return "The pop-up has been dismissed by the customer.";
+      }
+      if (condition && responseData && !evaluateCondition(condition, responseData)) {
+        return "The advanced rulesets did not match.";
+      }
+      return null;
+    }
+
+    var internal = {
+      // @showPopupOptions - Additional params that should be passed to public module script.
+      showPopup: function(showPopupOptions) {
+        log("Calling showPopup()");
+
+        var server = context.settings.server;
+
+        // Function to be executed after jQuery script load
+        function afterjQueryLoad() {
+            log("Calling afterJQueryLoad()");
+            var publicScript = server+"/public/javascripts/behav-popup.min.js";
+            context.nosto.loadScript(publicScript, afterPopupDialogScriptLoad);
+        }
+
+        // Function to be executed after
+        function afterPopupDialogScriptLoad() {
+            log("Calling afterPopupDialogScriptLoad()");
+            var options = {
+                preview: showPopupOptions.preview,
+                context: context,
+                campaignId: showPopupOptions.campaignId,
+                readCookie: readCookie,
+                writeCookie: writeCookie,
+                statsFn: getUpdateStatFn(showPopupOptions.preview),
+                callback: callback,
+                effect: showPopupOptions.effect,
+                trigger: showPopupOptions.trigger,
+                debug: showPopupOptions.debug
+            };
+            if (showPopupOptions.cart) {
+              options.cartSize = showPopupOptions.cart.size;
+              options.cartTotal = showPopupOptions.cart.total;
+            }
+            // Call the loaded pop-up script
+            context.nosto.window.discountPopUp(options);
+        }
+        context.nosto.api.internal.loadInternalJQuery(afterjQueryLoad);
+      },
+      updateStatFn: function(campaignId, statType) {
+          try {
+              var img = new Image();
+              var rand = Math.random().toFixed(5).substring(2);
+              img.src = (context.settings.server + "/overlay/discount-modal/increaseStat?" +
+                      "account=" + context.settings.account + "&s=" + statType +
+                      "&campaignId=" + encodeURIComponent(campaignId)) + "&rand=" + rand;
+
+          } catch (exception) {
+              log("Failed to update stats");
+          }
+      }
+    };
+
+    // Utility functions
+    // ----------------------------------------
+    // update usage statistics of a given type
+    function getUpdateStatFn(preview) {
+        if (preview && preview === true) {
+            return function(){};
+        }
+        return internal.updateStatFn;
+    }
+
+    return {
+        internal: internal,
+        preview: preview,
+        open: open,
+        okToOpen: okToOpen,
+        openCheck: openCheck,
+        stampOnCheckoutPage: stampOnCheckoutPage,
+        openMinimized: openMinimized,
+        done: done,
+        writeCookie: writeCookie, // Export for testing
+        readCookie: readCookie // Export for testing
+    };
+}
+
+module.exports = discountPopup;
+
+},{"../domready.js":10,"../utils.js":26}],9:[function(require,module,exports){
+var OpenChain = require('./OpenChain.js');
+
+function ExitIntent(win) {
+  this.constructor(win);
+}
+ExitIntent.prototype = new OpenChain();
+ExitIntent.prototype.constructor = OpenChain;
+
+ExitIntent.prototype.clearTimeoutThenCall = function(listener) {
+  var i;
+  for (i = 0; i < this.listeners.length; i++) {
+    if (this.listeners[i] !== listener) {
+      continue;
+    }
+    this.listeners[i].cb();
+    this.deregister(i);
+  }
+};
+
+ExitIntent.prototype.handleMouseLeave = function(listener, mouseEvent) {
+  var i, self = this;
+  if (listener.reEnterTimeout) {
+    return;
+  }
+  if (listener.okToOpen && !listener.okToOpen()) {
+    return;
+  }
+
+  // Check that mouse is on the top of the browser
+  // This will rule out the scrollbar, debug toolbars on bottom and in
+  // general if the mouse leaves the screen from down, left / right.
+  if (mouseEvent && mouseEvent.y > 1) {
+    return;
+  }
+
+  if (mouseEvent && mouseEvent.stopPropagation) {
+    mouseEvent.stopPropagation();
+  }
+  
+  var reEntryTolerance = listener.config.reEntryTolerance || 0;
+
+  listener.reEnterTimeout = this.win.setTimeout(function() {
+    self.clearTimeoutThenCall(listener);
+  }, reEntryTolerance);
+};
+
+ExitIntent.prototype.handleMouseEnter = function(listener) {
+  if (listener.reEnterTimeout) {
+    this.win.clearTimeout(listener.reEnterTimeout);
+    listener.reEnterTimeout = null;
+  }
+};
+ExitIntent.prototype.setup = function(listener) {
+  var self = this;
+  var handleMouseEnterClos = function() {
+    self.handleMouseEnter(listener);
+  };
+  var handleMouseLeaveClos = function(event) {
+    self.handleMouseLeave(listener, event);
+  };
+  if (this.win.document.documentElement.addEventListener) {
+    this.win.document.documentElement.addEventListener('mouseleave', handleMouseLeaveClos, false);
+    this.win.document.documentElement.addEventListener('mouseenter', handleMouseEnterClos, false);
+  } else if (this.win.document.documentElement.attachEvent) {
+    // Legacy support for attach events IE8 and lower. Support is dropped in IE11
+    // http://msdn.microsoft.com/en-us/library/ie/ms536343(v=vs.85).aspx (27.8.2014),
+    // TODO: This might not work alone + our unsubscribe does not work with IE8.
+    this.win.document.documentElement.attachEvent('mouseleave', handleMouseLeaveClos);
+    this.win.document.documentElement.attachEvent('mouseleave', handleMouseEnterClos);
+  }
+};
+
+module.exports = ExitIntent;
+
+
+},{"./OpenChain.js":5}],10:[function(require,module,exports){
+/*
+ domReady adapted from https://github.com/cms/domready which is adapted from jquery
+ Exposed interface:
+ var domReadyCreator = require('/domready.js');
+ var domReady = domReadyCreator(window);
+ domReady(function(){ CALLED ON DOMREADY });
+ domReady(function(){ CALLED ON DOMREADY });
+*/
+
+
+var domReady = (function(targetWindow) {
+  var targetDocument = targetWindow.document;
+  var w3c = !!targetDocument.addEventListener, loaded = false, toplevel = false, fns = [];
+
+  if (w3c) {
+    targetWindow.addEventListener("DOMContentLoaded", contentLoaded, false);
+    targetWindow.addEventListener("load", ready, false);
+
+    poll();
+  } else {
+    targetDocument.attachEvent("onreadystatechange", contentLoaded);
+    targetWindow.attachEvent("onload", ready);
+
+    try {
+      toplevel = targetWindow.frameElement === null;
+    } catch (e) {
+    }
+    if (targetDocument.documentElement.doScroll && toplevel) {
+      scrollCheck();
+    }
+  }
+
+  function poll() {
+    //IE must wait for complete, others can start in "interactive", see: https://github.com/jquery/jquery/pull/901/files
+    if (targetDocument.attachEvent ? targetDocument.readyState === "complete"
+        : targetDocument.readyState !== "loading") {
+      contentLoaded();
+    } else {
+      setTimeout(poll, 50);
+    }
+  }
+
+  function contentLoaded() {
+    if (w3c) {
+      try{
+        targetDocument.removeEventListener("DOMContentLoaded", contentLoaded, true);
+      }catch(e){ /* Support Firefox 3.0: see https://bugzilla.mozilla.org/show_bug.cgi?id=563487 */ }
+    } else {
+      if (targetDocument.readyState === "complete") {
+        targetDocument.detachEvent("onreadystatechange", contentLoaded);
+      }
+    }
+    ready();
+  }
+
+  // If IE is used, use the trick by Diego Perini
+  // http://javascript.nwbox.com/IEContentLoaded/
+  function scrollCheck() {
+    if (loaded) {
+      return;
+    }
+
+    try {
+      targetDocument.documentElement.doScroll("left");
+    } catch (e) {
+      targetWindow.setTimeout(arguments.callee, 15);
+      return;
+    }
+    ready();
+  }
+
+  function ready() {
+    if (loaded) {
+      return;
+    }
+    loaded = true;
+
+    var len = fns.length, i = 0;
+
+    for (; i < len; i++) {
+      fns[i].call(targetDocument);
+    }
+  }
+
+  return function(fn) {
+    // if the DOM is already ready,
+    // execute the function
+    return (loaded) ? fn.call(targetDocument) : fns.push(fn);
+  };
+});
+
+module.exports=domReady;
+},{}],11:[function(require,module,exports){
+/*
+ effects adapted from jQuery 1.7.1 show() and defaultDisplay() functions in effects.js  
+ */
+
+var Effects = (function() {
+
+  function Effects() {
+    this.elemdisplay = {};
+    // Try to re-use the iframe created below
+    this.iframe = null;
+    this.iframeDoc = null;
+  }  
+
+  // Show the element in the site's window's document  
+  Effects.prototype.show = function(element, site) {
+    if (!element || !element.style || !element.nodeName || !site || !site.window || !site.window.document) {
+      return;
+    }
+    var doc = site.window.document,
+      nodeName = element.nodeName,
+      tempElem, display;
+
+    // Get the display value of an element in site's dom
+    function getDisplay (el) {
+      if (site.window.getComputedStyle) {
+        var style = site.window.getComputedStyle(el, null);
+        if (style) {
+          return style.getPropertyValue("display");
+        } else {
+          return "";
+        }
+      } else if (el.currentStyle && el.currentStyle.display) {
+        // Old IE compatibility
+        return el.currentStyle.display;
+      } else {
+        return "none";
+      }
+    }      
+
+    // Try to handle the simplest case: element has been hidden
+    // with a style attribute that has "display: none;"  
+    if (element.style.display === "none") {
+      element.style.display = "";
+    }
+
+    // If just clearing the display value in style attribute
+    // worked, we're done here.
+    if (getDisplay(element) !== "none") {
+      return;
+    }
+
+    // Now we know that the element has been hidden with a
+    // cascading style from somewhere else. In the next steps
+    // we try to find out a default display value we can
+    // set to the element's style attribute to force the
+    // element visible.
+
+    // Check the local cache for already resolved default display values
+    if (this.elemdisplay[nodeName]) {
+      element.style.display = this.elemdisplay[nodeName];
+      return;
+    }
+    
+    // Render an element with a matching tag name to site's window's document and see its value
+    // We do this to find out the tag's default display value even if the site's CSS
+    // has overridden it like
+    //   div { display: inline } 
+    tempElem = doc.createElement(nodeName);
+    doc.body.appendChild(tempElem);
+    display = getDisplay(tempElem);
+    doc.body.removeChild(tempElem);
+
+    // This case handles the (hopefylly) rare case of site's css hiding by tag name like
+    //   div { display: none }
+    // We want to show the element even in this case. See the discussion in jQuery bugs
+    //   http://bugs.jquery.com/ticket/8996
+    //   http://bugs.jquery.com/ticket/9106
+    // for their rationale for doing the iframe thing below. Another option would be
+    // to use a lookup table for default display values of tags like
+    //   http://www.w3.org/TR/CSS2/sample.html
+    // but as that doc states, the default display values are browser-dependant
+    // (and quirks mode dependant, see e.g. http://www.quirksmode.org/css/quirksmode.html#link4 )
+    if (display === "none" || display === "") {
+      if (!this.iframe) {
+        this.iframe = doc.createElement("iframe");
+        this.iframe.frameBorder = this.iframe.width = this.iframe.height = 0;
+      }
+      doc.body.appendChild(this.iframe);
+      // Try to re-use the cached iframe's document. The second clause checks
+      // for browsers that don't allow rewriting into the document.
+      if (!this.iframeDoc || !this.iframe.createElement ) {
+        this.iframeDoc = (this.iframe.contentWindow || this.iframe.contentDocument).document;
+        this.iframeDoc.write((document.compatMode === "CSS1Compat" ? "<!doctype html>" : "") + "<html><body>");
+        this.iframeDoc.close();
+      }
+      tempElem = this.iframeDoc.createElement(nodeName);
+      this.iframeDoc.body.appendChild(tempElem);
+      display = getDisplay(tempElem);
+      doc.body.removeChild(this.iframe);       
+    }
+
+    this.elemdisplay[nodeName] = display;
+    element.style.display = display;    
+  };
+  
+  return Effects;
+})();
+
+module.exports = Effects;
+
+},{}],12:[function(require,module,exports){
+function createErrorHandler(win, merchant, serverUrl) {
+  var errorMsg = [];
+  var errorCount = 0;
+  var errorHistory = [];
+
+  var handler = {
+    'merchant': merchant,
+    'customer': 'unknown',
+    'siteUrl': 'unknown',
+    'errorHistory': errorHistory,
+    //set while we are evaluating a recommendation
+    'recommendation':{}, 
+    onErrorListener: function(message, url, linenumber) {
+      //see: http://stackoverflow.com/questions/192570/firefox-error-loading-script-loading-google-analytics-in-ff2/7686057#7686057
+      if (navigator.userAgent.search('Firefox') !== -1 && message === 'Error loading script') {
+        // Firefox generates this error when leaving a page before all scripts have finished loading
+        return;
+      }
+      var logMsg = createBaseErrorMessage();
+      logMsg.reporter="window";
+      
+      if(url){
+        logMsg.scriptUrl=url;
+      }
+      if(linenumber && url){
+        logMsg.scriptUrl=url+':'+linenumber;
+      }
+      
+      //if it's an object, it should be an event
+      if (typeof message === 'string'){
+        logMsg.msg=message;
+      }else if (typeof message === 'object') {
+        try {
+          //ref: http://www.quirksmode.org/js/events_properties.html
+          //json.stringify won't work for events because they have circular references in dom
+          if (message.type) {
+            logMsg.msg += 'type: ' + message.type;
+          }
+          if (message.target) {
+            logMsg.msg += ' target: ' + message.target;
+          }
+          if (message.srcElement) {
+            logMsg.msg += ' srcElement: ' + message.srcElement;
+            //log src in case it's a script tag with an src attribute
+            if(message.srcElement.src){
+              logMsg.msg += ' srcElement.src: ' + message.srcElement.src;
+            }
+          }
+        } catch (e) {
+          logMsg.msg += ' (getting event info failed: ' + e + '.) ';
+        }
+      }
+
+      errorMsg.push(logMsg);
+      errorHistory.push(logMsg);
+      if(win.context){
+        win.context.log(logMsg);
+      }
+    },
+
+    reportError: function(e, reporter) {
+      var logMsg = createBaseErrorMessage();
+      logMsg.reporter=reporter;
+      
+      logMsg.msg = e.message;
+      if(e.number){ 
+        logMsg.msg += ' IE-errornum: ' + e.number;
+      }
+      if(e.fileName){ 
+        logMsg.scriptUrl=e.fileName;
+      }
+      if(e.lineNumber){ 
+        logMsg.scriptUrl += ':' + e.lineNumber;
+      }
+      if(e.columnNumber){ 
+        logMsg.scriptUrl +=':' + e.columnNumber;
+      }
+      if(e.name){ 
+        logMsg.msg += ' name: ' + e.name;
+      }
+      if(e.stack){ 
+        logMsg.stack = e.stack;
+      }
+      errorMsg.push(logMsg);
+      errorHistory.push(logMsg);
+
+      if(win.context){
+        win.context.log(logMsg);
+      }
+    }
+  };
+
+  
+  function createBaseErrorMessage(){
+    var logMsg = {"msg":""};
+    if(handler.customer){
+      logMsg.c=handler.customer;
+    }
+    if(handler.siteUrl){
+      logMsg.siteUrl=handler.siteUrl;
+    }
+    
+    //check if we are evalling templates
+    var templates = [];
+    for(var p in handler.recommendation){ templates.push(p); }
+    if ( templates.length>0 ){
+      logMsg.rec = templates.join(','); 
+    }
+    return logMsg;
+  }
+
+
+  function sendErrorsLoop() {
+    // send only first 10 errors
+    if (errorMsg.length > 0 && errorCount < 10) {
+      
+      var logMsg = errorMsg.shift();
+      errorCount+=1;
+      
+      
+
+      var src = serverUrl + "/jserror2?m="+merchant;
+      for (var key in logMsg) {
+        if (logMsg.hasOwnProperty(key)) {
+            src+='&'+key+'='+encodeURIComponent(logMsg[key]);
+        }
+      }
+      
+      //needs to work in IE so take only first 1800 chars
+      src = src.substring(0, 1800);
+      var img = new Image();
+      img.src=src;
+    }
+    setTimeout(sendErrorsLoop, 5000);
+  }
+
+
+  win.onerror = handler.onErrorListener;
+  sendErrorsLoop();
+  return handler;
+}
+
+
+
+module.exports = createErrorHandler;
+},{}],13:[function(require,module,exports){
+var utils=require('./utils.js');
+var parseUri=require('./parseuri.js');
+
+var validPageTypes = {
+  front: true,
+  category: true,
+  product: true,
+  cart: true,
+  search: true,
+  notfound: true,
+  order: true
+};
+
+//HELPERS
+
+function parsePrice(text){
+    if(!text)
+        return;
+    if(text.indexOf("Smarty")>-1){
+        return;
+    }
+    var simplifiedText = text.replace(/[^0-9.,-]/g,"").replace(",",".");
+    simplifiedText = utils.trim(simplifiedText);
+    if(simplifiedText){
+        return parseFloat(simplifiedText);
+    }else{
+        return;
+    }
+}
+
+function setValue(obj, propName, val){
+    if(utils.isArray(val) && val.length===0){
+        return;
+    }
+    if(val){
+        obj[propName]=val;
+    }
+}
+
+function texts(selector, nodes){
+    var t=[];
+    for(var i=0; nodes && i<nodes.length; i++){
+        var text = selector.getText(nodes[i]);
+        if(text){
+            var trimmedText = utils.trim(text);
+            if(trimmedText.length >0){
+              t.push(trimmedText);
+            }
+        }
+    }
+    return t;
+}
+
+/**
+ * @param {boolean} omitMissing whether to omit fields whose value evaluates to false
+ * @param {boolean} flat whether to omit elements that aren't immediate children of rootElement
+ */
+function extractObject(selector, rootElement, props, omitMissing, flat){
+    var p={},
+        val,
+        findF = flat ? selector.findImmediate : selector.find;
+    for(var j=0; j<props.length; j++){
+        val = undefined;
+        var prop = props[j];
+        if(utils.isArray(prop)){
+            val=texts(selector, findF.call(selector, "."+prop[0], rootElement));
+            if (!omitMissing || (val && val.length>0)){
+                p[prop[0]]=val;
+            }
+        }else{
+            val=texts(selector, findF.call(selector, "."+prop, rootElement))[0];
+            if (!omitMissing || val){
+                p[prop]=val;
+            }
+        }
+    }
+    return p;
+}
+
+//Helper to find items from cart and purchase order
+function findItems(selector, rootElement){
+    var props = [ "product_id", "name", "quantity", "unit_price","price_currency_code" ];
+    var items = [];
+    var itemDivs = selector.find(".line_item", rootElement);
+    for(var i=0; i<itemDivs.length; i++){
+        var ci = extractObject(selector, itemDivs[i], props);
+        if (ci.quantity) {
+            ci.quantity = parseInt(ci.quantity, 10);
+        }
+        if(ci.unit_price){
+            ci.unit_price = parsePrice(ci.unit_price);
+        }
+        if(ci.product_id){
+          items.push(  ci  );
+        }
+    }
+
+    return items;
+}
+
+function emptyArrayToUndefined(someArray){
+    if(someArray.length===0){
+        return;
+    }else{
+        return someArray;
+    }
+}
+
+function extractCanonicalLink(context, selector) {
+  var i, canonicalLink, links = selector.find("link");
+  for(i=0; i<links.length; i++){
+    if(links[i].rel && links[i].rel.toLowerCase() === "canonical" && links[i].getAttribute('href')){
+      var source = links[i].getAttribute('href');
+      if(!source){
+        return null;
+      }
+      canonicalLink = parseUri(source);
+      if (!canonicalLink) {
+        return null;
+      }
+      // IE 6 compatibility: element.href doesn't resolve itself to an absolute URI
+      if (!canonicalLink.authority && context.siteUrl) {
+        return context.siteUrl.protocol + '://' + context.siteUrl.authority + source;
+      } else if (!canonicalLink.protocol && context.siteUrl) {
+        return context.siteUrl.protocol + ':' + source;
+      } else {
+        return source;
+      }
+    }
+  }
+  return null;
+}
+
+/**
+ * @param {String} containerSelector of the product data container. If not defined, defaults to .nosto_product
+ *                                   Also if containerSelector is defined, the product is extracted partially:
+ *                                   missing and undefined fields are left out from from the returned object.
+ */
+function findProducts(context, selector, pageUrl, rootElement, containerSelector) {
+    var extractPartially = !!containerSelector;
+    var pDivs = selector.find(containerSelector || ".nosto_product", rootElement);
+    var prods=[];
+    var variations=[];
+    var i, j;
+    var canonicalLink = extractCanonicalLink(context, selector);
+    for(i=0; i<pDivs.length; i++){
+        var pDiv=pDivs[i];
+        var props = [ "url", "product_id", "name", "image_url", "thumb_url", "price", "list_price",
+                      "price_currency_code", "availability", [ "category" ], "brand",
+                      "description", "date_published", "valid_until", "variation_id",
+                      "review_count", "rating_value", "condition", "gender", "age_group", "gtin",
+                      "google_category", "unit_pricing_measure", "unit_pricing_base_measure", "unit_pricing_unit"
+                        ];
+        var p = extractObject(selector, pDiv, props, extractPartially, true);
+        setValue( p, "tags1", texts(selector, selector.find(".tag1", pDiv)));
+        setValue( p, "tags2", texts(selector, selector.find(".tag2", pDiv)));
+        setValue( p, "tags3", texts(selector, selector.find(".tag3", pDiv)));
+        setValue( p, "alternate_image_urls", texts(selector, selector.find(".alternate_image_url", pDiv)));
+
+        if(p.price){
+            //store the original price in text mode
+            p.price_text=p.price;
+            //set price as number
+            p.price=parsePrice(p.price_text);
+        }
+        if(p.list_price){
+            p.list_price=parsePrice(p.list_price);
+        }
+        if (!containerSelector) {
+          // Not extracting product variations
+          if (!p.url) {
+            // Product URL not explicitly specified
+            if(canonicalLink && canonicalLink.length){
+              // Set canonical link href as product URL
+              p.url = canonicalLink;
+            }else if(pageUrl){
+              // set page URL as product URL
+              p.url = pageUrl;
+            }
+          }
+          // Find product variations under the top-level product definition
+          variations = findProducts(context, selector, pageUrl, pDiv, ".variation");
+          for (j=0;j<variations.length;j++) {
+            if (variations[j].variation_id) {
+              p.variations = p.variations || {};
+                p.variations[variations[j].variation_id] = variations[j];
+            }
+          }
+        }
+        prods.push(p);
+    }
+    return prods;
+}
+
+
+function findCart(selector, rootElement) {
+    var cartDiv = selector.find(".nosto_cart", rootElement)[0];
+    if(!cartDiv){
+        return;
+    }
+    var cart = {};
+    var cookieHash = selector.find(".hcid")[0];
+    if (cookieHash) {
+        cart.hcid = selector.getText(cookieHash);
+    }
+    cart.items = findItems(selector, cartDiv);
+    return cart;
+}
+
+function findCustomer(selector, rootElement){
+    var custDiv = selector.find(".nosto_customer", rootElement)[0];
+    if(!custDiv){
+        return;
+    }
+    var props = ["email", "first_name", "last_name", "customer_reference", "source", "hcid"];
+    var customer = extractObject(selector, custDiv, props);
+    customer.type='loggedin';
+    return customer;
+}
+
+function findOrder(selector, rootElement){
+    var orderDiv = selector.find(".nosto_purchase_order", rootElement)[0];
+    if(!orderDiv){
+        return;
+    }
+
+    var orderProps = ["payment_provider", "external_order_ref", "hcid"];
+    var order = extractObject(selector, orderDiv, orderProps);
+
+    //NOTE: order_status_code is stored as order_status
+    var orderStatus = selector.find(".order_status_code")[0];
+    if (orderStatus) {
+        order.order_status = selector.getText(orderStatus);
+    }
+
+    var infoProps = ["order_number", "email", "first_name", "last_name"];
+    order.info = extractObject(selector, orderDiv, infoProps);
+    order.info.type = "order";
+
+    var items = findItems(selector, orderDiv);
+    if(items){
+        order.items = items;
+    }
+    return order;
+}
+
+function findSearchTerms(selector, rootElement){
+    var terms = texts(selector, selector.find(".nosto_search_term", rootElement));
+    return emptyArrayToUndefined(terms);
+}
+
+function findCurrentCategories(selector, rootElement){
+    var cats = texts(selector, selector.find(".nosto_category", rootElement));
+    return emptyArrayToUndefined(cats);
+}
+
+function findRestoreLink(selector, rootElement){
+    var cartDiv = selector.find(".nosto_cart", rootElement)[0];
+    if(!cartDiv){
+        return;
+    }
+    var restoreDiv = selector.find(".restore_link", rootElement)[0];
+    if(!restoreDiv){
+        return;
+    }
+    var text = selector.getText(restoreDiv);
+    if(text){
+        return utils.trim(text);
+    }else{
+        return '';
+    }
+}
+
+function findCurrentVariation(selector, rootElement){
+    // Return undefined if not found
+    return texts(selector, selector.find(".nosto_variation", rootElement))[0];
+}
+
+function findCurrentPriceVariation(selector, rootElement){
+    // Return undefined if not found
+    return texts(selector, selector.find(".nosto_price_variation", rootElement))[0];
+}
+
+function findExternalVisitRef(selector, rootElement){
+    // Return undefined if not found
+    return texts(selector, selector.find(".nosto_external_visit_ref", rootElement))[0];
+}
+
+function findCurrentPluginVersion(selector, rootElement){
+    // Return undefined if not found
+    // Iterates each of the meta tags as querySelector or querySelectorAll may
+    // not be available
+    var metaTags = selector.find('meta', rootElement);
+    for (var i = 0, n = metaTags.length; i < n; i++) {
+        if (metaTags[i].getAttribute("name") === 'nosto-version') {
+            return metaTags[i].getAttribute("content");
+        }
+    }
+    return null;
+}
+
+function findPageType(selector, rootElement){
+    // Return undefined if not found
+    var pageType = texts(selector, selector.find(".nosto_page_type", rootElement))[0];
+    if (pageType) {
+        pageType = pageType.toLowerCase();
+        if (validPageTypes[pageType]) {
+            return pageType;
+        }
+    }
+}
+
+function findElements(selector, rootElement){
+    var ids=[];
+    var nodes=selector.find(".nosto_element", rootElement);
+    for(var i=0; i<nodes.length; i++){
+        ids.push(nodes[i].id);
+    }
+    return ids;
+}
+
+function processCssSelectors(context, selector) {
+    var recos = context.settings.recommendations;
+    var urlWithoutParams = context.siteUrlCleaned;
+    if (urlWithoutParams.indexOf("?") > -1) {
+        urlWithoutParams = urlWithoutParams.substring(0, urlWithoutParams.indexOf("?"));
+    }
+    for (var i = 0; i < recos.length; i++) {
+        if (recos[i].urls && recos[i].urls.length > 0) {
+            var include = false;
+            for (var j = 0; j < recos[i].urls.length; j++) {
+                var url = recos[i].urls[j];
+                if (url.indexOf("/") === 0) {
+                    var re = new RegExp(url.substring(1, url.length - 1));
+                    include |= re.test(context.siteUrlCleaned);
+                } else if (url.indexOf("?") === 0) {
+                    include |= context.siteUrlCleaned === url;
+                } else {
+                    include |= urlWithoutParams === url;
+                }
+            }
+            if (!include) {
+                // skip processing, because no url rule matched
+                continue;
+            }
+        }
+        if (recos[i].cssSelector) {
+            var target = selector.find(recos[i].cssSelector)[0];
+            if (target) {
+                var source = selector.find("#" + recos[i].divId)[0];
+                if (source) {
+                    if (source.parentNode === target || selector.isDescendant(source, target)) {
+                        // skip processing, if source is child of target or target is under source
+                        continue;
+                    }
+                    selector.remove(source);
+                }
+                var divHtml = "<div id='" + recos[i].divId + "' class='nosto_element'></div>";
+                selector.append(target, divHtml);
+            }
+        }
+    }
+}
+
+// Do not add anything here that you do not want sent over push request. Any
+// here should have a corresponding field in PushRequestMessageV1 in Playcart.
+// The field can also be deleted in right before the tagging is sent. Some fields
+// such as priceVariation are deleted right before the push request.
+function pageTagging(context, pageUrl, optionalRootElement) {
+    var selector = context.site.dom;
+    if (context.settings.recommendations) {
+        try{
+            processCssSelectors(context, selector);
+        }catch(e){
+            context.errors.reportError(e, 'processCssSelectors');
+        }
+    }
+    return {
+        products:findProducts(context, selector, pageUrl, optionalRootElement),
+        cart: findCart(selector, optionalRootElement),
+        customer:findCustomer(selector, optionalRootElement),
+        order:findOrder(selector, optionalRootElement),
+        search_terms:findSearchTerms(selector, optionalRootElement),
+        categories:findCurrentCategories(selector, optionalRootElement),
+        variation:findCurrentVariation(selector, optionalRootElement),
+        priceVariation:findCurrentPriceVariation(selector, optionalRootElement),
+        pluginVersion:findCurrentPluginVersion(selector, optionalRootElement),
+        elements:findElements(selector, optionalRootElement),
+        external_visit_ref:findExternalVisitRef(selector, optionalRootElement),
+        restore_link:findRestoreLink(selector, optionalRootElement),
+        page_type:findPageType(selector, optionalRootElement)
+    };
+}
+
+
+
+module.exports={
+        "findProducts":findProducts,
+        "findCart": findCart,
+        "findCustomer":findCustomer,
+        "findOrder":findOrder,
+        "findSearchTerms":findSearchTerms,
+        "findCurrentCategories":findCurrentCategories,
+        "findCurrentVariation":findCurrentVariation,
+        "findCurrentPriceVariation":findCurrentPriceVariation,
+        "findExternalVisitRef":findExternalVisitRef,
+        "findCurrentPluginVersion":findCurrentPluginVersion,
+        "findElements":findElements,
+        "findRestoreLink":findRestoreLink,
+        "findPageType":findPageType,
+        "pageTagging":pageTagging,
+        "parsePrice":parsePrice
+};
+
+},{"./parseuri.js":22,"./utils.js":26}],14:[function(require,module,exports){
+function refererEvent(uri) {
+  try{ 
+    var keyWord;
+    if (uri.host.match(/google/i) || uri.host.match(/bing/i)) {
+      keyWord = uri.queryKey.q;
+    }else if (uri.host.match(/yahoo/i)) {
+      keyWord = uri.queryKey.p;
+    }
+
+    if (keyWord) {
+      // + don't seem to be transformed to spaces with
+      return ["es", keyWord.replace(/\+/g, ' ')];
+    }
+  }catch(error){
+    return; 
+  }
+}
+
+module.exports={
+  "refererEvent":refererEvent
+};
+},{}],15:[function(require,module,exports){
+function campaignEvent(currentUri){
+  if(currentUri.queryKey.utm_campaign){
+    return ["ec", currentUri.queryKey.utm_campaign];
+  }
+}
+
+
+function searchQuery(currentUri, siteSearchQueryParameterName) {
+  if (!currentUri.queryKey) {
+    return null;
+  }
+  var searchQueryValue = currentUri.queryKey[siteSearchQueryParameterName];
+  if (searchQueryValue) {
+    // try decoding
+    try {
+      searchQueryValue = decodeURIComponent(searchQueryValue);
+    } catch (e1) {
+      try {
+        searchQueryValue = unescape(searchQueryValue);
+      } catch (e2) {
+      }
+    }
+    searchQueryValue = searchQueryValue.replace(/\+/g, " ");
+  }
+  return searchQueryValue;
+}
+
+function searchEvent(currentUri, siteSearchQueryParameterName) {
+  var searchString = searchQuery(currentUri, siteSearchQueryParameterName);
+  if (searchString) {
+    return ["is", searchString];
+  }
+}
+
+function sourceEvent(currentUri, nostoSourceParameterName, supportedTypes, recommendationRefParamName) {
+  var i;
+  var supports = supportedTypes || [];
+  var isSupported = {};
+  for (i = 0; i < supports.length; i++) {
+    isSupported[supports[i]] = true;
+  }
+
+  var sourceString = currentUri.queryKey[nostoSourceParameterName];
+  if (sourceString && isSupported[sourceString]) {
+
+    var srcEventArr = ["src", sourceString];
+    var recRef = currentUri.queryKey[recommendationRefParamName];
+    if (recRef) {
+      srcEventArr.push(recRef);
+    }
+
+    return srcEventArr;
+  }
+  return undefined;
+}
+
+function recommendationRef(currentUri, recommendationRefParamName){
+  return searchQuery(currentUri, recommendationRefParamName);
+}
+
+function refMail(currentUri){
+  return currentUri.queryKey.refmail;
+}
+
+module.exports={
+  'campaignEvent':campaignEvent,
+  'searchQuery':searchQuery,
+  'searchEvent':searchEvent,
+  'recommendationRef':recommendationRef,
+  'refMail':refMail,
+  'sourceEvent':sourceEvent
+};
+},{}],16:[function(require,module,exports){
+// uhoh, this iframe thingy is... complex. 
+// benefits & reasons why we do it:
+//   * async even for old browsers, don't defer onLoad
+//   * place to load scripts without worrying about breaking site's scripts 
+//   * able to use window.onerror for err reporting as it's a dedicated window
+// Here's some related resources about using iframes for script loading:
+// ref: http://www.lognormal.com/blog/2012/12/12/the-script-loader-pattern/
+// ref: http://calendar.perfplanet.com/2012/the-non-blocking-script-loader-pattern/
+// ref:lightingjs
+// ref: http://calendar.perfplanet.com/2011/the-art-and-craft-of-the-async-snippet/
+// ref: https://www.facebook.com/note.php?note_id=10151176218703920
+// ref: http://www.iab.net/media/file/rich_media_ajax_best_practices.pdf
+
+//Create an iframe that is 'friendly' meaning that scripts loaded in it, can talk to
+//the parent window and vice versa
+function fif(win, id){
+  var dom,doc,iframe = win.document.createElement('iframe');
+  iframe.src = "javascript:false";
+  (iframe.frameElement || iframe).style.cssText = "width: 0; height: 0; border: 0; display: none;";
+  win.document.body.appendChild(iframe);
+
+  try {
+    doc = iframe.contentWindow.document;
+  } catch(e) {
+    dom = document.domain;
+    iframe.src="javascript:var d=document.open();d.domain='"+dom+"';void(0);";
+    doc = iframe.contentWindow.document;
+  }
+  doc.open()._l = function() {
+    if(dom) this.domain = dom;
+    
+    var js = this.createElement("script");
+    js.id = id;
+    this.body.appendChild(js);
+  };
+
+  doc.write('<body onload="document._l();">');
+  doc.close();
+  return iframe;
+}
+
+
+module.exports=fif;
+},{}],17:[function(require,module,exports){
+var contextCreator = require('./context.js');
+var apiCreator = require('./api.js');
+
+
+
+
+
+
+
+function processQueuedAPICalls(context, api) {
+  var shift = [].shift;
+  function apiCaller(apicallback) {
+    if (typeof apicallback === "function") {
+      apicallback(api);
+    } else {
+      context.errors.reportError(new Error('unknown api call via Nosto array: '+apicallback), "apiCaller");
+    }
+  }
+  if(context.loader){
+    var q = context.loader.q;
+    if(q){
+      //first process all calls from the queue
+      while (q && q.length > 0) {
+        var c = shift.apply(q);
+        try{
+          apiCaller(c);
+        }catch(e){
+          context.errors.reportError(e, "apiCaller");
+        }
+      }
+    }
+    //replace queue to be instant call
+    context.loader.q = {};
+    context.loader.q.push = apiCaller;
+  }else{
+      context.site.window.nostojs=function(cb){ cb(api); };
+  }
+}
+
+
+function ensureStringify(context, callbackFn) {
+  var compatJson = context.settings.server + '/public/json2.js';
+  if (typeof context.nosto.window.JSON !== 'undefined') {
+    callbackFn();
+  } else {
+    context.nosto.loadOnce(compatJson, function() {
+      if (typeof context.nosto.window.JSON !== 'undefined') {
+        callbackFn();
+      } else {
+        context.errors.reportError("Failed loading " + compatJson, "ensureStringify");
+      }
+    });
+  }
+}
+
+
+function nostoLoaded(window){
+  if(typeof window.nosto !== "undefined"){
+    // nosto initialised on this window
+    return true;
+  }else if(window.parent){
+    // check if nosto is in parent
+
+    // if the store is in an iframe already and nosto is included directly
+    // (without the embed) then referring window.parent can throw security
+    // exception for cross-origin reference
+    try{
+      if(typeof window.parent.nosto !== "undefined"){
+        return true;
+      }
+    }catch(e){
+      /* ignore the possible security exception, then nosto is not loaded */
+    }
+  }
+  return false;
+}
+
+function init(win){
+  win=win||window;
+  if(nostoLoaded(win)){
+    // Nosto already loaded
+    return false;
+  }
+  if(!win.document.body){
+      setTimeout(function(){ init(win); }, 10);
+      return false;
+  }
+  var origWindow = win.parent;
+  var context = contextCreator(win);
+  try{
+    var api = apiCreator(context);
+
+    if(context.initOptions.disableAutoLoad){
+      api.setAutoLoad(false);
+    }
+
+    function act(force){
+      ensureStringify(context, function() {
+        try{
+          if (force || api.isAutoLoad()) {
+            api.internal.overlay.activate();
+            api.loadRecommendations();
+          }         
+        }catch(e){
+          context.errors.reportError(e, "act");
+          throw e;
+        }
+      });
+    }
+
+    if(!context.active){
+      context.log("account is not active for current site.");
+      
+      //backwards compatibility to support the call nosto.act(true); from the site window
+      // otherwise an exception is thrown and can break other javascript
+      context.nosto.window.act=function(){
+        context.log("cannot act. account is not active for current site.");
+      };
+    }else{ 
+
+      //backwards compatibility to support the call nosto.act(true); from the site window
+      context.nosto.window.act=act;
+
+      //debugtoolbar relies on this to call the api
+      context.nosto.api=api;
+
+      ensureStringify(context, function() {
+        processQueuedAPICalls(context, api);
+      });
+
+      context.site.domReady(function() {
+          //If some library moves the iframe it will get reloaded and the current we have reference to will be
+          //garbage collected and won't just work anymore. Looks like we can only notice this in chrome, 
+          //other browsers just stop the script completely, let's do an error report.
+          
+          if(origWindow &&
+            (!window || !context.nosto.window || !context.nosto.window.isPreview)){
+              try{
+                  var m ='nosto_iframe_tampered on site: '+origWindow.document.location.href;
+                  var img = new origWindow.Image();
+                  img.src = context.settings.server + "/jserror1?msg=" + encodeURIComponent(m) + '&m=' + encodeURIComponent(context.settings.account);
+              }catch(e){}
+          }
+          act();
+      });
+
+      if (context.siteUrl.anchor && context.siteUrl.anchor.indexOf("2CSettings-") === 0) {
+          api.internal.loadUnsubscribePanel();
+      }
+    }
+  }catch(e){
+    context.errors.reportError(e, 'init');
+    throw e;
+  }
+}
+
+init(window);
+
+},{"./api.js":1,"./context.js":3}],18:[function(require,module,exports){
+function createLoaders(win, errors){
+  var loaded={};
+
+  return {
+    loadScript: function(url, callbackFn){
+      try{
+        var doc = win.document;
+        var head = doc.getElementsByTagName("head")[0] || doc.documentElement;
+        var s = doc.createElement('script');
+        s.async = "async";
+        s.src = url;
+        s.onreadystatechange = s.onload = function () {
+          var state = s.readyState;
+          if (!state || /loaded|complete/.test(state)) {
+              // Handle memory leak in IE (see jQuery script ajaxtransport src)
+              s.onload = s.onreadystatechange = null;
+
+              // Remove the script
+              if ( s.parentNode ) {
+                s.parentNode.removeChild( s );
+              }
+
+              // Dereference the script
+              s = undefined;
+
+              if(callbackFn){
+                callbackFn();
+              }
+            }
+          };
+        // use body if available. more safe in IE
+        (doc.body || head).appendChild(s);
+      }catch(e){
+        errors.reportError(e, 'loadScript');
+        throw e;
+      }
+    },
+    loadOnce: function(url, callbackFn){
+      try{
+        if(!loaded[url]){
+          loaded[url]=[];
+          loaded[url].push(callbackFn);
+
+          this.loadScript(url,function(){
+              while (loaded[url] && loaded[url].length > 0) {
+                var cb = loaded[url].shift();
+                cb();
+              }
+              loaded[url].push=function(cb){
+                cb();
+              };
+          });
+        }else{
+          loaded[url].push(callbackFn);
+        }    
+      }catch(e){
+        errors.reportError(e, 'loadOnce');
+        throw e;
+      }
+    },
+    jsonp: function(url, callbackFn){
+      var cbName = 'cb'+Math.floor((Math.random()*10000)+1);
+      win[cbName]=function(data){
+        try{
+          callbackFn(data);
+        }finally{
+          win[cbName]=undefined;
+          try{
+            //IE does not allow to remove window properties
+            delete win[cbName];
+          }catch(e){ }
+        }
+      };
+      this.loadScript(url+'&cb='+cbName);
+    },
+
+    evalScript: function (elem, callbackFn) {
+      try{
+        if(elem.src){
+          this.loadOnce(elem.src, function(){
+            callbackFn();
+          });
+        }else{
+          var data = (elem.text || elem.textContent || elem.innerHTML || "" );
+          if(data){
+            //( win.execScript || function( data ) { win[ "eval" ].call( win, data ); } )( data );
+            //first try eval and if it fails try execscript, this is required for supporting IE9
+            try{
+              (function( data ) { win[ "eval" ].call( win, data ); })( data );
+            }catch(e){ 
+              if(win.execScript){
+                  try{
+                      win.execScript(data);
+                  }catch(ef){  errors.reportError(ef, 'evalScript'); }
+              }else{
+                  errors.reportError(e, 'evalScript');
+              }
+            }
+            
+          }
+          if(callbackFn){
+            callbackFn();
+          }
+        }
+      }catch(e){
+        errors.reportError(e, 'evalScript');
+        throw e;
+      }  
+    },
+
+    /**
+    * http://www.eriwen.com/javascript/how-to-cors/
+    * Make a X-Domain request to url and callback.
+    *
+    * @param url {String}
+    * @param method {String} HTTP verb ('GET', 'POST', 'DELETE', etc.)
+    * @param data {String} request body
+    * @param callback {Function} to callback on completion
+    * @param errback {Function} to callback on error
+    */
+    xdr: function (url, method, data, callback, errback) {
+      try{
+        var req, sent=false;
+        if(typeof XMLHttpRequest !== 'undefined') {
+          req = new XMLHttpRequest();
+          if('withCredentials' in req) {
+            req.open(method, url, true);
+            req.onerror = errback;
+            req.onreadystatechange = function() {
+              if (req.readyState === 4) {
+                if (req.status >= 200 && req.status < 400) {
+                  callback(req.responseText);
+                } else {
+                  errback(new Error('Response returned with non-OK status: '+req.status+", responseText: "+req.responseText));
+                }
+              }
+            };
+            req.send(data);
+            sent=true;
+          }
+        }
+        if(typeof XDomainRequest !== 'undefined' && !sent) {
+          req = new XDomainRequest();
+          req.onerror = errback;
+          req.onload = function() {
+            callback(req.responseText);
+          };
+          req.ontimeout = errback;
+          req.timeout = 10000;
+          req.open(method, url);
+          req.send(data);
+          sent=true;
+        } 
+
+        if(!sent){
+          errback(new Error('CORS not supported'));
+        } 
+      }catch(e){
+        errors.reportError(e, 'xdr');
+        throw e;
+      } 
+    }
+  };
+}
+module.exports=createLoaders;
+},{}],19:[function(require,module,exports){
+/*
+    nut, the concise CSS selector engine
+
+    Version     : 0.2.0
+    Author      : Aurélien Delogu (dev@dreamysource.fr)
+    Homepage    : https://github.com/pyrsmk/nut
+    License     : MIT
+*/
+
+module.exports=function(document,pristineDocument){
+ 
+    var doc=document,
+        pristineDoc=pristineDocument,
+        firstChild='firstChild',
+        nextSibling='nextSibling',
+        getElementsByClassName='getElementsByClassName',
+        length='length',
+
+    /*
+        Get id node
+
+        Parameters
+            String selector : one selector
+            Object context  : one context
+
+        Return
+            Array           : nodes
+    */
+    getNodesFromIdSelector=function(selector,context){
+        var node=doc.getElementById(selector);
+        if(!node){
+            return [];
+        }
+        else{
+            return [node];
+        }
+    },
+
+    /*
+        Get nodes corresponding to one class name (for IE<9)
+
+        Parameters
+            String selector : one selector
+            Object context  : one context
+
+        Return
+            Array           : nodes
+    */
+    getNodesByClassName=function(name,context){
+        // Init vars
+        var node=context[firstChild],
+            nodes=[],
+            elements;
+        // Browse children
+        if(node){
+            do{
+                if(node.nodeType==1){
+                    // Match the class
+                    // We check for presence of match() because className for SVG nodes
+                    // is not a string. We disregard those because elements we care about
+                    // are not SVG nodes.
+                    if(node.className && node.className.match && node.className.match('\\b'+name+'\\b')){
+                        nodes.push(node);
+                    }
+                    // Get nodes from node's children
+                    if((elements=getNodesByClassName(name,node))[length]){
+                        nodes=nodes.concat(elements);
+                    }
+                }
+            }
+            while(node=node[nextSibling]);
+        }
+        return nodes;
+    },
+
+    /*
+        Get nodes from a class selector
+
+        Parameters
+            String selector : one selector
+            Object context  : one context
+
+        Return
+            Array           : nodes
+    */
+    getNodesFromClassSelector=function(selector,context){
+        // Originally nut checked the existence of getElementsByClassName
+        // from the context. Problem is that at least Prototype.js redeclares
+        // that function to the doc and then tries to call the native
+        // getElementsByClassName, which fails for IE < 9.
+        // We check its existence from a "pristine document", i.e.
+        // the nosto window's document.
+        if(pristineDoc && pristineDoc[getElementsByClassName]){
+            return context[getElementsByClassName](selector);
+        }
+        else{
+            return getNodesByClassName(selector,context);
+        }
+    },
+
+    /*
+        Get nodes from a tag selector
+
+        Parameters
+            String selector : one selector
+            Object context  : one context
+
+        Return
+            Array           : nodes
+    */
+    getNodesFromTagSelector=function(selector,context){
+        return context.getElementsByTagName(selector);
+    };
+
+    /*
+        Select DOM nodes
+
+        Parameters
+            String selectors        : CSS selectors
+            Array, Object context   : contextual node
+
+        Return
+            Array                   : found nodes
+    */
+    return function(selectors,context){
+        // Format
+        if(!context){
+            context=doc;
+        }
+        if(typeof context=='object' && context.pop){
+            context=context[0];
+        }
+        // Init vars
+        var local_contexts,
+            future_local_contexts,
+            selector,
+            elements,
+            nodes=[],
+            j,k,l,m,n,o,
+            getNodesFromSelector;
+        // Prepare selectors
+        selectors=selectors.split(',');
+        n=-1;
+        while(selector=selectors[++n]){
+            selectors[n]=selector.split(/\s+/);
+        }
+        // Evaluate selectors for each global context
+        j=selectors[length];
+        while(j){
+            // Init local context
+            local_contexts=[context];
+            // Evaluate selectors
+            k=-1;
+            l=selectors[--j][length];
+            while(++k<l){
+                // Drop empty selectors
+                if(selector=selectors[j][k]){
+                    // Id
+                    if(selector.charAt(0)=='#'){
+                        selector=selector.substr(1);
+                        getNodesFromSelector=getNodesFromIdSelector;
+                    }
+                    // Class
+                    else if(selector.charAt(0)=='.'){
+                        selector=selector.substr(1);
+                        getNodesFromSelector=getNodesFromClassSelector;
+                    }
+                    // Tag
+                    else{
+                        getNodesFromSelector=getNodesFromTagSelector;
+                    }
+                    // Evaluate current selector for each local context
+                    future_local_contexts=[];
+                    m=-1;
+                    while(local_contexts[++m]){
+                        elements=getNodesFromSelector(selector,local_contexts[m]);
+                        n=-1;
+                        o=elements[length];
+                        while(++n<o){
+                            future_local_contexts.push(elements[n]);
+                        }
+                    }
+                    // Set new local contexts
+                    local_contexts=future_local_contexts;
+                }
+            }
+            // Append new nodes
+            nodes=nodes.concat(local_contexts);
+        }
+        return nodes;
+    };
+
+};
+
+},{}],20:[function(require,module,exports){
+/*******************************************************************************
+ * Copyright (c) 2016 Nosto Solutions Ltd All Rights Reserved.
+ *
+ * This software is the confidential and proprietary information of
+ * Nosto Solutions Ltd ("Confidential Information"). You shall not
+ * disclose such Confidential Information and shall use it only in
+ * accordance with the terms of the agreement you entered into with
+ * Nosto Solutions Ltd.
+ ******************************************************************************/
+
+var isTouchDevice = 'ontouchstart' in window.document.documentElement;
+
+var OpenChain = require('./discountpopup/OpenChain.js');
+var AfterDelayLink = require('./discountpopup/afterDelay.js');
+var AfterScrollLink = require('./discountpopup/afterScroll.js');
+var ExitIntentLink = require('./discountpopup/exitIntent.js');
+
+var discountFeature = require('./discountpopup/discountPopupFeature.js');
+
+var useViralityPopUp = true;
+var viralityFeature = require('./viralitypopup/viralityPopupFeature.js');
+
+function countObjectKeys(obj) {
+  var key, i = 0;
+  for (key in obj) {
+    if (obj.hasOwnProperty(key)) {
+      i++;
+    }
+  }
+  return i;
+}
+
+function stringCompare(a, b) {
+  if (a < b) {
+    return -1;
+  } else if (a > b) {
+    return 1;
+  } else {
+    return 0;
+  }
+}
+
+var windowShoppingFeature = require('./windowShopping/windowShoppingFeature.js');
+
+function overlay(context, extract, callback) {
+  try {
+    var activate, setTriggers;
+    var campaignList, openPopupById, enablePopupById, disablePopupById, lookupPopupCampaignById, apiEffects, lookupCampaignName;
+    var triggerPriority, sortedCampaignsWithType;
+    var openChain, afterDelayLink, afterScrollLink, exitIntentLink;
+    // Defined, to have a determinate order to list popup campaigns
+    var triggerTypes = ['api', 'newCustomer', 'exitIntent', 'allCustomers', 'externalCampaign', 'abandonedCart'];
+    
+    var discountPopup;
+    if (context.settings.discountPopupTriggers && countObjectKeys(context.settings.discountPopupTriggers) > 0) {
+      discountPopup = discountFeature(context, extract, lookupCampaignName, callback);
+    }
+
+    var viralityPopup;
+    if (useViralityPopUp) {
+      viralityPopup = viralityFeature(context);
+    }
+
+    var windowShopping;
+    if (windowShoppingFeature && context.settings.useWindowShopping) {
+      windowShopping = windowShoppingFeature(context);
+    }
+
+    // init exit intent and scroll handlers
+    openChain = new OpenChain(context.site.window);
+    afterDelayLink = new AfterDelayLink(context.site.window);
+    exitIntentLink = new ExitIntentLink(context.site.window);
+    afterScrollLink = new AfterScrollLink(context.site.window);
+
+    if (discountPopup) {
+      discountPopup.stampOnCheckoutPage();
+    }
+
+    campaignList = function() {
+      var campaigns, triggerTypeIndex, campaignIndex, allCampaigns = [];
+      if (!context.settings.discountPopupTriggers) {
+        return [];
+      }
+      for (triggerTypeIndex = 0; triggerTypeIndex < triggerTypes.length; triggerTypeIndex++) {
+        campaigns = context.settings.discountPopupTriggers[triggerTypes[triggerTypeIndex]] || [];
+        for (campaignIndex = 0; campaignIndex < campaigns.length; campaignIndex++) {
+          campaigns[campaignIndex].type = triggerTypes[triggerTypeIndex];
+          allCampaigns.push(campaigns[campaignIndex]);
+        }
+      }
+      return allCampaigns;
+    };
+
+    lookupPopupCampaignById = function(popupId) {
+      var key, campaigns, i;
+      if (!context.settings.discountPopupTriggers) {
+        return null;
+      }
+      for (key in context.settings.discountPopupTriggers) {
+        if (!context.settings.discountPopupTriggers.hasOwnProperty(key)) {
+          continue;
+        }
+        campaigns = context.settings.discountPopupTriggers[key];
+        for (i = 0; i < campaigns.length; i++) {
+          if (campaigns[i].popup_id === popupId) {
+            return campaigns[i];
+          }
+        }
+      }
+      return null;
+    };
+
+    lookupCampaignName = function(popupId) {
+      var popup = lookupPopupCampaignById(popupId);
+      return popup ? popup.campaign : null;
+    };
+
+    // Returns an object of effects (with defaults set, if missing) or an error string
+    // in case of bad input
+    apiEffects = function(effects, campaignEffects) {
+      var value, effect, transformed = {};
+      for (effect in effects) {
+        if (!effects.hasOwnProperty(effect)) {
+          continue;
+        }
+        value = effects[effect];
+        if (effect === "overlayOpacity" || effect === "opacity_min") {
+          if (typeof value !== "number" || isNaN(value)) {
+            return "Expected a number for effect " + effect + ", got value " + value;
+          }
+          if (value < 0 || value > 1.0) {
+            return "Expected a number between 0 and 1.0 for effect " + effect + ", got value " + value;
+          }
+          transformed.opacity_min = value;
+        } else if (effect === "fadeInDelayMs" || effect === "fadein_min") {
+          if (typeof value !== "number" || isNaN(value)) {
+            return "Expected a number for effect " + effect + ", got value " + value;
+          }
+          if (value < 0) {
+            return "Expected a positive number for effect " + effect + ", got value " + value;
+          }
+          transformed.fadein_min = parseInt(value, 10);
+        } else {
+          return "Unexpected effect " + effect;
+        }
+      }
+      // Set defaults for unset values. First try to find the defaults from campaign setup.
+      if (transformed.opacity_min === undefined) {
+        if (campaignEffects.opacity_min !== undefined) {
+          transformed.opacity_min = campaignEffects.opacity_min;
+        } else {
+          transformed.opacity_min = 0.8;
+        }
+      }
+      if (transformed.fadein_min === undefined) {
+        if (campaignEffects.fadein_min !== undefined) {
+          transformed.fadein_min = campaignEffects.fadein_min;
+        } else {
+          transformed.fadein_min = 300;
+        }
+      }
+      return transformed;
+    };
+
+    // Returns a string in case of an error
+    openPopupById = function(popupId, options) {
+      var msg;
+      var popup = lookupPopupCampaignById(popupId);
+      var opts = options || {};
+
+      if (!popup) {
+        return "Pop-up campaign not found.";
+      }
+
+      var effects = apiEffects(opts.effects || {}, popup.effect || {});
+
+      if (typeof effects === "string") {
+        return effects;
+      }
+
+      if (opts.preview) {
+        discountPopup.preview(popup.campaign, effects);
+        return;
+      }
+
+      msg = discountPopup.openCheck(popup.campaign);
+      if (msg) {
+        return msg;
+      }
+      discountPopup.open(popup.campaign, null, effects, "api");
+    };
+
+    enablePopupById = function(popupId) {
+      var popup = lookupPopupCampaignById(popupId);
+      if (popup) {
+        popup.condition.enabledInJs = true;
+      }
+    };
+
+    disablePopupById = function(popupId) {
+      var popup = lookupPopupCampaignById(popupId);
+      if (popup) {
+        popup.condition.enabledInJs = false;
+      }
+    };
+
+    activate = function() {
+      try {
+        // virality pop-up rely on an URL parameter only and can be triggered right away
+        if (viralityPopup && viralityPopup.okToOpen()) {
+          viralityPopup.open();
+        }
+
+        // to minimize flickering, we need to load & show a discount pop-up ribbon ASAP
+        if (discountPopup) {
+          discountPopup.openMinimized();
+        }
+      } catch (e) {
+        context.errors.reportError(e, 'activate');
+      }
+    };
+
+    // Priority defined by triggers for popup campaigns that have no explicit order
+    triggerPriority = {
+      externalCampaign: 1,
+      allCustomers: 2,
+      newCustomer: 3,
+      exitIntent: 4,
+      abandonedCart: 5,
+      api: 6
+    };
+
+    sortedCampaignsWithType = function() {
+      var campaigns = campaignList();
+      campaigns.sort(function(a, b) {
+        var triggerComparison;
+        if (typeof a.ordinal !== 'number' && typeof b.ordinal === 'number') {
+          return 1;
+        } else if (typeof a.ordinal === 'number' && typeof b.ordinal !== 'number') {
+          return -1;
+        } else if (typeof a.ordinal === 'number' && typeof b.ordinal === 'number') {
+          if (a.ordinal === b.ordinal) {
+            return stringCompare(a.popup_id, b.popup_id);
+          }
+          return a.ordinal - b.ordinal;
+        } else {
+          triggerComparison = triggerPriority[a.type] - triggerPriority[b.type];
+          if (triggerComparison === 0) {
+            return stringCompare(a.popup_id, b.popup_id);
+          } else {
+            return triggerComparison;
+          }
+        }
+      });
+      return campaigns;
+    };
+
+    setTriggers = function(responseData) {
+
+      try {
+        var url = context.siteUrl;
+        if (windowShopping) {
+          windowShopping.open(url, responseData);
+        } 
+
+        if (context.settings && context.settings.discountPopupTriggers && discountPopup) {
+
+          if (responseData.cdc) {
+            discountPopup.done(responseData.cdc);
+          }
+
+          var i, trigger, campaignId, effect, condition, setupChain, openChainConfig = {}, campaigns = sortedCampaignsWithType();
+
+          setupChain = function(effect, isExitIntent) {
+            var chainConfig = {links: []};
+            if (isExitIntent) {
+              chainConfig.links.push(afterDelayLink);
+              chainConfig.links.push(exitIntentLink);
+              if (effect) {
+                chainConfig.reEntryTolerance = effect.re_entry_tolerance || 30;
+                chainConfig.delay = effect.delay_min || 3000;
+              } else {
+                // Backwards compatibility of campaigns not having effects defined
+                chainConfig.reEntryTolerance = 30;
+                chainConfig.delay = 3000;
+              }
+            } else if (effect && effect.delay_min) {
+              chainConfig.links.push(afterDelayLink);
+              chainConfig.delay = effect.delay_min;
+            }
+            if (effect) {
+              if (effect.scroll_min) {
+                chainConfig.links.unshift(afterScrollLink);
+                chainConfig.scroll = effect.scroll_min;
+              }
+            }
+            return chainConfig;
+          };
+
+          for (i = 0; i < campaigns.length; i++) {
+            campaignId = campaigns[i].campaign;
+            condition = campaigns[i].condition;
+            if (!condition) {
+              campaigns[i].condition = condition = {};
+            }
+            effect = campaigns[i].effect;
+            trigger = campaigns[i].type;
+            if (trigger === 'externalCampaign' &&
+              (!url || !url.queryKey || (!url.queryKey.nosto_dp && !url.queryKey.nostodp) ||
+              ((url.queryKey.nosto_dp && url.queryKey.nosto_dp !== campaigns[i].id) ||
+              (url.queryKey.nostodp && url.queryKey.nostodp !== campaigns[i].id)))) {
+              continue;
+            }
+            if (trigger === 'newCustomer' && !responseData.nc) {
+              continue;
+            }
+            if (trigger === 'abandonedCart' && (!responseData.hiic || responseData.he)) {
+              continue;
+            }
+            if (!discountPopup.okToOpen(campaignId, condition, responseData)) {
+              continue;
+            }
+            if (!campaigns[i].enabled) {
+              condition.enabled = false;
+            }
+
+            openChain.register(discountPopup.okToOpen,
+              setupChain(effect, trigger === 'exitIntent' || trigger === 'abandonedCart'), discountPopup.open, campaignId,
+              condition, responseData, effect, trigger);
+          }
+        }
+      } catch(e) {
+        context.errors.reportError(e, '#nostoCouponGetBtn.click');
+      }
+    };
+    
+    return {
+      // Expose for tests
+      sortedCampaignsWithType: sortedCampaignsWithType,
+      activate: activate,
+      campaignList: campaignList,
+      openPopup: openPopupById,
+      enablePopup: enablePopupById,
+      disablePopup: disablePopupById,
+      setTriggers: setTriggers,
+      discountPopup: {
+        instance: discountPopup,
+        preview: function(campaignId) {
+          discountFeature(context).preview(campaignId);
+        }
+      },
+      viralityPopup: {
+        instance: viralityPopup,
+        preview: function() {
+          viralityFeature(context).preview();  
+        }
+      },
+      windowShopping:{
+        instance: windowShopping,
+        preview: function() {
+          windowShoppingFeature(context).preview();  
+        }
+      }
+    };
+  } catch (e) {
+    context.errors.reportError(e, 'overlay');
+    return {
+      activate: false,
+      campaignList: function(){ return []; },
+      openPopup: function(){},
+      enablePopup: function(){},
+      disablePopup: function(){},
+      setTriggers: function(){},
+      discountPopup: {instance: {}, preview: function(){}},
+      viralityPopup: {instance: {}, preview: function(){}},
+      windowShopping: {instance: {}, preview: function(){}}
+    };
+  }
+}
+
+module.exports = overlay;
+
+},{"./discountpopup/OpenChain.js":5,"./discountpopup/afterDelay.js":6,"./discountpopup/afterScroll.js":7,"./discountpopup/discountPopupFeature.js":8,"./discountpopup/exitIntent.js":9,"./viralitypopup/viralityPopupFeature.js":27,"./windowShopping/windowShoppingFeature.js":28}],21:[function(require,module,exports){
+/**
+ * @param Object tagged data that has been output from pageTagging() in extract module
+ * @param Object context the Nosto context
+ * @return String a string matching PageType enum string value or null if unable to resolve
+ */
+function resolve(tagged, context) {
+  if (tagged.page_type) {
+    return tagged.page_type;
+  } else if (tagged.products && tagged.products.length > 0) {
+    return "product";
+  } else if (tagged.order) {
+    return "order";
+  } else if (context.searchQuery || (tagged.search_terms && tagged.search_terms.length > 0)) {
+    return "search";
+  } else if (tagged.categories && tagged.categories.length > 0) {
+    return "category";
+  }
+  return null;
+}
+
+module.exports = resolve;
+
+},{}],22:[function(require,module,exports){
+// a node.js module fork of
+// parseUri 1.2.2
+// (c) Steven Levithan <stevenlevithan.com>
+// MIT License
+// see: http://blog.stevenlevithan.com/archives/parseuri
+// see: http://stevenlevithan.com/demo/parseuri/js/
+
+//forked into a node.js module by franz enzenhofer 
+ 
+
+function parseUri (str) {
+	var	o   = parseUri.options,
+		m   = o.parser[o.strictMode ? "strict" : "loose"].exec(str),
+		uri = {},
+		i   = 14;
+
+	while (i--) uri[o.key[i]] = m[i] || "";
+
+	uri[o.q.name] = {};
+	uri[o.key[12]].replace(o.q.parser, function ($0, $1, $2) {
+		if ($1) uri[o.q.name][$1] = $2;
+	});
+
+	return uri;
+}
+
+parseUri.options = {
+	strictMode: false,
+	key: ["source","protocol","authority","userInfo","user","password","host","port","relative","path","directory","file","query","anchor"],
+	q:   {
+		name:   "queryKey",
+		parser: /(?:^|&)([^&=]*)=?([^&]*)/g
+	},
+	parser: {
+		strict: /^(?:([^:\/?#]+):)?(?:\/\/((?:(([^:@?\/]*)(?::([^:@?\/]*))?)?@)?([^:\/?#]*)(?::(\d*))?))?((((?:[^?#\/]*\/)*)([^?#]*))(?:\?([^#]*))?(?:#(.*))?)/,
+		loose:  /^(?:(?![^:@?\/]+:[^:@\/]*@)([^:\/?#.]+):)?(?:\/\/)?((?:(([^:@?\/]*)(?::([^:@?\/]*))?)?@)?([^:\/?#]*)(?::(\d*))?)(((\/(?:[^?#](?![^?#\/]*\.[^?#\/.]+(?:[?#]|$)))*\/?)?([^?#\/]*))(?:\?([^#]*))?(?:#(.*))?)/
+	}
+};
+
+module.exports = parseUri;
+},{}],23:[function(require,module,exports){
+var extractFromReferer = require('./extractFromReferer.js');
+var extractFromUrl = require('./extractFromUrl.js');
+
+
+function createRequest(context){
+  var data = {ev:[], el:[], cats:[], oc:false};
+  if(context.nosto.window.isPreview()){
+    data.preview=true;
+  }
+  return {
+    'data':data,
+    addEvent: function(type, target, nostoElementIdReference){
+      //Use array slice to make arguments a real array (and cut the length)
+      data.ev.push(Array.prototype.slice.call(arguments,0,3));
+    },
+    addElements: function(nostoElementIds){
+      for(var i=0; i<nostoElementIds.length;i++){
+        data.el.push(nostoElementIds[i]);
+      }
+    },
+    addCartItems: function(cartItemIds){
+      if(!data.cids){
+        data.cids=[];
+      }
+      for(var i=0; i<cartItemIds.length;i++){
+        data.cids.push(cartItemIds[i]);
+      }
+    },
+    addCartCookieHash: function(cartCookieHash) {
+      data.ch=cartCookieHash;
+    },
+    addCartTotal: function(cartTotal){
+      data.ct=cartTotal;
+    },
+    addCartSize: function(cartSize){
+      data.cs=cartSize;
+    },
+    addCurrentCategories: function(currentCategories){
+      for(var i=0; i<currentCategories.length;i++){
+        data.cats.push(currentCategories[i]);
+      }
+    },
+    addCurrentVariation: function(currentVariation){
+      data.cv=currentVariation;
+    },
+    addCurrentPriceVariation: function(currentPriceVariation){
+      data.cpv=currentPriceVariation;
+    },
+    addExternalVisitRef: function(externalVisitRef){
+      data.evr=externalVisitRef;
+    },
+    addOrderData: function(taggedOrder){
+      var i, orLen=taggedOrder.items.length;
+      data.orn=taggedOrder.info.order_number;
+      data.ore=taggedOrder.info.email;
+      data.or=[];
+      data.orq=[];
+      data.orp=[];
+      data.orc=[];
+      for(i=0; i<orLen;i++){
+        data.or.push(taggedOrder.items[i].product_id);
+        data.orq.push(taggedOrder.items[i].quantity);
+        data.orp.push(taggedOrder.items[i].unit_price);
+        data.orc.push(taggedOrder.items[i].price_currency_code);
+      }
+      data.oh = taggedOrder.hcid;
+    },
+    setOnOrderConfirmation: function(onOrderConfirmation){
+      data.oc=onOrderConfirmation;
+    },
+    prunedUrl: function(){
+      // In the case we're sending an order, prune non-order related parts from the URL so that we won't
+      // hit browser request limits and lose the order data.
+      var i,url, dataIndex, maxLen,
+      params=[],
+      stringify=context.nosto.window.JSON.stringify,
+      // The fields to prune from a too large request, in this order
+      prune=["cids", "cats", "ev", "el"];
+      params.push('c='+context.customer);
+      params.push('m='+context.settings.account);
+      //don't save the request if it's not coming from a valid host (treat like a bot)
+      if(!context.isValidHost()){
+        params.push('skip=true');
+      }
+
+
+      dataIndex = params.length;
+
+      function buildUrl() {
+        params[dataIndex] = 'data='+encodeURIComponent(stringify(data));
+        url = (context.settings.partnerRecommendationEndpoint || context.settings.server) +'/ev1?'+ params.join('&');
+      }
+      buildUrl();
+      if (!data.orn){
+        // No order data in the request, no need to prune
+        return url;
+      }
+      // Prune items from the data until we go under the limit or run out of items to prune
+      maxLen = 2060;
+      for(i=0;i<prune.length;i++){
+        if(url.length>maxLen){
+          delete data[prune[i]];
+          buildUrl();
+        } else {
+          break;
+        }
+      }
+      if(url.length>maxLen){
+        context.errors.reportError(new Error('order request too long: '+stringify(data)), "prunedUrl");
+      }
+      return url;
+    },
+    loadRecommendations: function(optionalNostoElementReference,optionalRootElementIdForSendTagging, attemptN){
+      //try to serialise event & push requests, give up after 1 sec
+      attemptN = attemptN || 0;
+      var request = this;
+      if(attemptN===20){
+        context.errors.reportError(new Error('Wait max time reached'), "loadRecommendations");
+      }
+      if(context.requests.sent.length>context.requests.received.length && attemptN<20){
+        setTimeout(function(){ request.loadRecommendations(optionalNostoElementReference, optionalRootElementIdForSendTagging, attemptN+1); }, 50);
+        return;
+      }else{
+        //mark request started
+        context.requests.sent.push("loadRecommendations");
+      }
+        
+        
+      var campaignEvent=extractFromUrl.campaignEvent(context.siteUrl);
+      if(campaignEvent){
+        data.ev.push(campaignEvent);
+      }
+      var refererEvent=extractFromReferer.refererEvent(context.referer);
+      if(refererEvent){
+        data.ev.push(refererEvent);
+      }
+      var searchEvent=extractFromUrl.searchEvent(context.siteUrl, context.settings.searchQueryParam);
+      if(searchEvent){
+        data.ev.push(searchEvent);
+      }
+
+      var sourceEvent=extractFromUrl.sourceEvent(context.siteUrl, context.settings.sourceParameterName, context.settings.trackingTypes, context.settings.nostoRefParam);
+      if (sourceEvent) {
+        data.ev.push(sourceEvent);
+      }
+
+      if(!context.nosto.window.isPreview()){
+        var recRef=extractFromUrl.recommendationRef(context.siteUrl, context.settings.nostoRefParam);
+        var refMail=extractFromUrl.refMail(context.siteUrl);
+        if(refMail) {
+          data.m = refMail;
+          data.mt = recRef;
+        }else if(recRef){
+          for(var i=0; data.ev && i<data.ev.length; i++){
+            var p = data.ev[i];
+            if(p[0] === 'vp'){
+              p.push(recRef);
+            }
+          }
+        }
+      }
+
+      context.log(data);
+      var url = this.prunedUrl();
+      context.nosto.jsonp(url, function(responseData){
+        //mark request ended
+        context.requests.received.push("loadRecommendations");
+        
+        context.log(responseData);
+        context.site.domReady(function(){
+          context.nosto.api.internal.handleResponse(data, responseData);
+
+          //only send push request if used from valid host
+          if(context.isValidHost()){
+            var opts = { onOrderConfirmation: data.oc };
+            context.nosto.api.sendTagging(optionalRootElementIdForSendTagging,optionalNostoElementReference,opts);
+          }
+        });
+      });
+    }
+  };
+}
+
+
+
+module.exports=createRequest;
+},{"./extractFromReferer.js":14,"./extractFromUrl.js":15}],24:[function(require,module,exports){
+var Nut = require('./nut.js');
+var utils=require('./utils.js');
+
+var Selector = function(doc, loaders, errors, pristineDoc) {
+  this.nut = Nut(doc, pristineDoc);
+  this.loaders=loaders;
+  this.errors=errors;
+  this.doc=doc;
+};
+
+Selector.prototype.find = function(selector, parentElement) {
+  if(parentElement && utils.isArray(parentElement)){ parentElement=parentElement[0]; }
+  //if given element matches, return it directly
+  if(this.isMatch(selector, parentElement)){
+    return [parentElement];
+  }
+  // use querySelectorAll as primary CSS engine
+  if (this.doc.querySelectorAll && (!parentElement || parentElement.querySelectorAll)) {
+    var result = null;
+    if (parentElement) {
+      result = parentElement.querySelectorAll(selector);
+    } else {
+      result = this.doc.querySelectorAll(selector);
+    }
+    return Array.prototype.slice.call(result);
+  }
+  //use Nut as the fallback
+  return this.nut(selector, parentElement);
+};
+
+Selector.prototype.findImmediate = function(selector, parentElement) {
+  var i,
+    filtered = [],
+    elems = this.find(selector, parentElement);
+  for(i = 0; i < elems.length; i++) {
+    if(elems[i].parentNode===parentElement){
+      filtered.push(elems[i]);
+    }
+  }
+  return filtered;
+};
+
+Selector.prototype.isMatch = function(selector, element){
+  if(!element){ return false; }
+  if(selector.charAt(0)==='#' && element.id === selector.substr(1)){
+    return true;
+  }
+  else if(selector.charAt(0)==='.' && this.hasClass(element, selector.substr(1)) ){
+    return true;
+  }
+  else if(element.tagName === selector){
+    return true;
+  }
+  return false;
+};
+
+
+//like jquery does it
+Selector.prototype.hasClass = function(element, className){
+  var matchedStr = " " + className + " ";
+  return ( (" " + element.className + " ").replace(/[\t\r\n\f]/g, " ").indexOf(matchedStr) > -1 ); 
+};
+
+
+
+function findText(node) {
+  var text = node.innerText || node.textContent;
+  //IE 7 & 8 whitespace handling is different from other browsers. If there are multiple spaces, they are replaced with one space
+  //Run a regexp to match IE 7 & 8 (and our crawler behavior)
+  if(text){
+    text = text.replace(/\s+/g, ' ');
+  }
+  return text;
+
+}
+Selector.prototype.getText = findText;
+
+
+function allNodes(elem, list){
+  var ret=elem.childNodes;
+  for (var i = 0; ret && ret[i]; i++) {
+    list.push(ret[i]);
+    allNodes(ret[i], list);
+  }
+  return list;
+}
+
+//http://stackoverflow.com/questions/9401581/html-vs-innerhtml
+function insertAndExecute(domelement, text, loaders, errors) {
+
+  //IE8 doesn't add script or style elements to the dom unless there is a visible element before those elements
+  //found in our tests and also reported by
+  //http://allofe.com/contentm/easy_pages/easy_page_view.php?sid=62&page_id=246&blueprint_id=22
+  domelement.innerHTML = "<div>_</div>" + text;
+  domelement.removeChild(domelement.firstChild);
+
+  var scripts = [];
+  var ret = allNodes(domelement, []);
+  for (var i = 0; ret[i]; i++) {
+    if (nodeName(ret[i], "script") && (!ret[i].type || ret[i].type.toLowerCase() === "text/javascript")) {
+      scripts.push(ret[i].parentNode ? ret[i].parentNode.removeChild(ret[i]) : ret[i]);
+    }
+
+  }
+
+  errors.recommendation[domelement.id]='evalling';
+  function exec(){
+    if(scripts.length>0){
+      loaders.evalScript(scripts.shift(), exec);
+    }else{
+      delete errors.recommendation[domelement.id];
+    }
+  }
+  exec();
+}
+
+function nodeName(elem, name) {
+  return elem.nodeName && elem.nodeName.toUpperCase() === name.toUpperCase();
+}
+
+function html(container, htmlText) {
+  if (arguments.length === 1) {
+    return container.innerHTML;
+  } else {
+    container.innerHTML = htmlText;
+    insertAndExecute(container, htmlText, this.loaders, this.errors);
+  }
+}
+Selector.prototype.html = html;
+
+function remove(element) {
+  element.parentNode.removeChild(element);
+}
+Selector.prototype.remove = remove;
+
+
+function isDescendant(parent, node) {
+  while (node) {
+    if (node === parent) {
+      return true;
+    }
+    node = node.parentNode;
+  }
+  return false;
+}
+Selector.prototype.isDescendant = isDescendant;
+
+function append(parent, child) {
+  if (typeof child === "string") {
+    var template = this.doc.createElement('div');
+    template.innerHTML = child;
+    child = template.firstChild;
+  }
+  parent.appendChild(child);
+}
+Selector.prototype.append = append;
+
+module.exports = Selector;
+},{"./nut.js":19,"./utils.js":26}],25:[function(require,module,exports){
+function reportTimes(context, nostoReady) {
+  try{
+    var uri = context.settings.server + "/jstiming1?";
+
+    function getParam(param, val){
+      if(!val || val===0)
+        return "";
+      return "&"+param+"="+(nostoReady.getTime()-val);
+    }
+    try {
+      // If browser supports html5 timing API
+      if (typeof context.site.window.performance !== 'undefined') {
+        var t = context.site.window.performance.timing;
+        uri += getParam("fromResponseEnd", t.responseEnd);
+        uri += getParam("fromResponseStart", t.responseStart);
+        uri += getParam("fromDomReady", t.domContentLoadedEventEnd);
+        uri += getParam("fromPageLoaded", t.loadEventEnd);
+      }
+    } catch(eInner) {
+      // Ignore the exception. Some platforms handle
+      // performance and performance.timing access inconsistently:
+      // at least Mobile Chrome on iPhone and Firefox 27.0 on Win XP.
+    }
+    uri+=getParam("fromInclude", context.created.getTime());
+    if(context.loader && context.loader.l){
+      var embedTs=context.loader.l;
+      uri+=getParam("fromEmbed",  embedTs.getTime());
+    }
+    
+    var img = new Image();
+    img.src = uri;
+    }catch(e){
+      context.errors.reportError(e, 'reportTimes');
+      throw e;
+  }
+}
+module.exports = reportTimes;
+
+},{}],26:[function(require,module,exports){
+module.exports={
+  trim: function(str){
+   return str.replace(/^\s+|\s+$/g, "");
+  },
+  isArray: function(obj){
+    return  Object.prototype.toString.call( obj ) === '[object Array]';
+  },
+  endsWith: function(str, suffix) {
+    return str.indexOf(suffix, str.length - suffix.length) !== -1;
+  },
+  //modify or add the parameter to the given url
+  setParameter: function(uri, key, value) {
+    var base = uri.split('#')[0];
+    var hash = uri.split('#')[1] || '';
+    if(hash.length>0){ hash='#'+hash; }
+    var re = new RegExp("([?&])" + key + "=?.*?(&|$)", "i");
+    var separator = base.indexOf('?') !== -1 ? "&" : "?";
+    if (base.match(re)) {
+      return base.replace(re, '$1' + key + "=" + value + '$2') + hash;
+    }
+    else {
+      return base + separator + key + "=" + value + hash;
+    }
+  },
+  isSubcategoryOf: function(child, parent) {
+    if (typeof(child) !== 'string' || typeof(parent) !== 'string') {
+      return false;
+    }
+    child = child.toLowerCase();
+    parent = parent.toLowerCase();
+    if (child === parent) {
+      return true;
+    } else if (child.indexOf(parent) === 0) {
+      var sep = child.charAt(parent.length);
+      if (sep === '/' || sep === '|') {
+        return true;
+      }
+    }
+    return false;
+  },
+  isMobile: function(userAgent) {
+    // based on regexp taken from http://detectmobilebrowsers.com
+    if (!userAgent) {
+      return false;
+    }
+    return (/(android|bb\d+|meego).+mobile|avantgo|bada\/|blackberry|blazer|compal|elaine|fennec|hiptop|iemobile|ip(hone|od)|iris|kindle|lge |maemo|midp|mmp|mobile.+firefox|netfront|opera m(ob|in)i|palm( os)?|phone|p(ixi|re)\/|plucker|pocket|psp|series(4|6)0|symbian|treo|up\.(browser|link)|vodafone|wap|windows ce|xda|xiino/i.test(userAgent) ||
+            /1207|6310|6590|3gso|4thp|50[1-6]i|770s|802s|a wa|abac|ac(er|oo|s\-)|ai(ko|rn)|al(av|ca|co)|amoi|an(ex|ny|yw)|aptu|ar(ch|go)|as(te|us)|attw|au(di|\-m|r |s )|avan|be(ck|ll|nq)|bi(lb|rd)|bl(ac|az)|br(e|v)w|bumb|bw\-(n|u)|c55\/|capi|ccwa|cdm\-|cell|chtm|cldc|cmd\-|co(mp|nd)|craw|da(it|ll|ng)|dbte|dc\-s|devi|dica|dmob|do(c|p)o|ds(12|\-d)|el(49|ai)|em(l2|ul)|er(ic|k0)|esl8|ez([4-7]0|os|wa|ze)|fetc|fly(\-|_)|g1 u|g560|gene|gf\-5|g\-mo|go(\.w|od)|gr(ad|un)|haie|hcit|hd\-(m|p|t)|hei\-|hi(pt|ta)|hp( i|ip)|hs\-c|ht(c(\-| |_|a|g|p|s|t)|tp)|hu(aw|tc)|i\-(20|go|ma)|i230|iac( |\-|\/)|ibro|idea|ig01|ikom|im1k|inno|ipaq|iris|ja(t|v)a|jbro|jemu|jigs|kddi|keji|kgt( |\/)|klon|kpt |kwc\-|kyo(c|k)|le(no|xi)|lg( g|\/(k|l|u)|50|54|\-[a-w])|libw|lynx|m1\-w|m3ga|m50\/|ma(te|ui|xo)|mc(01|21|ca)|m\-cr|me(rc|ri)|mi(o8|oa|ts)|mmef|mo(01|02|bi|de|do|t(\-| |o|v)|zz)|mt(50|p1|v )|mwbp|mywa|n10[0-2]|n20[2-3]|n30(0|2)|n50(0|2|5)|n7(0(0|1)|10)|ne((c|m)\-|on|tf|wf|wg|wt)|nok(6|i)|nzph|o2im|op(ti|wv)|oran|owg1|p800|pan(a|d|t)|pdxg|pg(13|\-([1-8]|c))|phil|pire|pl(ay|uc)|pn\-2|po(ck|rt|se)|prox|psio|pt\-g|qa\-a|qc(07|12|21|32|60|\-[2-7]|i\-)|qtek|r380|r600|raks|rim9|ro(ve|zo)|s55\/|sa(ge|ma|mm|ms|ny|va)|sc(01|h\-|oo|p\-)|sdk\/|se(c(\-|0|1)|47|mc|nd|ri)|sgh\-|shar|sie(\-|m)|sk\-0|sl(45|id)|sm(al|ar|b3|it|t5)|so(ft|ny)|sp(01|h\-|v\-|v )|sy(01|mb)|t2(18|50)|t6(00|10|18)|ta(gt|lk)|tcl\-|tdg\-|tel(i|m)|tim\-|t\-mo|to(pl|sh)|ts(70|m\-|m3|m5)|tx\-9|up(\.b|g1|si)|utst|v400|v750|veri|vi(rg|te)|vk(40|5[0-3]|\-v)|vm40|voda|vulc|vx(52|53|60|61|70|80|81|83|85|98)|w3c(\-| )|webc|whit|wi(g |nc|nw)|wmlb|wonu|x700|yas\-|your|zeto|zte\-/i.test(userAgent.substr(0, 4)));
+  }
+};
+},{}],27:[function(require,module,exports){
+/*******************************************************************************
+ * Copyright (c) 2016 Nosto Solutions Ltd All Rights Reserved.
+ *
+ * This software is the confidential and proprietary information of
+ * Nosto Solutions Ltd ("Confidential Information"). You shall not
+ * disclose such Confidential Information and shall use it only in
+ * accordance with the terms of the agreement you entered into with
+ * Nosto Solutions Ltd.
+ ******************************************************************************/
+
+// Module that is used to display platform popup when
+// someone clicks "Powered by Nosto" logo from our default templates
+// (email plans, site abandonment popup)
+
+
+// var domReadyCreator = require('../domready.js');
+// var parseUri = require('../parseuri.js');
+
+// @params object Additional parameters
+// @context object Nosto context object (see discountPopupFeature.js for examples on how the context is used)
+function viralityPopup(context) {
+    // Internal fields
+
+    // Internal log, enable if you want to debug the feature in more
+    // detail. Add "console.log(logMessage)" to enable logging (or some
+    // other logging facility).
+    //
+    function log(logMessage) {
+        //console.log("Platform popup ->", logMessage);
+    }
+
+
+    // Preview the platform popup.
+    function preview() {
+        log("Calling preview()");
+        open({"preview" : true});
+    }
+
+    // @showPopupOptions - Additional params that should be passed to public module script.
+    function open(showPopupOptions) {
+        log("Calling open()");
+        if (context.popupShown) {
+            log("Other popup is currently active");
+            return;
+        }
+        
+        var server = context.settings.server;
+        // Function to be executed after jQuery script load
+        function afterjQueryLoad() {
+            log("Calling afterJQueryLoad()");
+            var publicScript = server+"/public/javascripts/virality-popup.js";
+            context.nosto.loadScript(publicScript, afterPopupDialogScriptLoad);
+        }
+
+        // Function to be executed after
+        function afterPopupDialogScriptLoad() {
+            log("Calling afterPopupDialogScriptLoad()");
+            var options = {
+                "context" : context
+            };
+            if (showPopupOptions && showPopupOptions.preview) {
+                options.preview = showPopupOptions.preview;
+            }
+            // Call the loaded pop-up script
+            context.nosto.window.viralityPopUp(options);
+        } 
+        context.nosto.api.internal.loadInternalJQuery(afterjQueryLoad);
+    }
+    
+    function okToOpen() {
+      if (!context.popupShown) {
+        var url = context.siteUrl;
+        if (url && url.queryKey && url.queryKey.nosto_modal &&
+            url.queryKey.nosto_modal === "about-nosto") {
+          return true;
+        }
+        
+        return false;
+      }
+    }
+
+
+    return {
+        "preview" : preview,
+        "okToOpen": okToOpen,
+        "open" : open
+    };
+}
+
+module.exports = viralityPopup;
+},{}],28:[function(require,module,exports){
+  /*******************************************************************************
+ * Copyright (c) 2016 Nosto Solutions Ltd All Rights Reserved.
+ *
+ * This software is the confidential and proprietary information of
+ * Nosto Solutions Ltd ("Confidential Information"). You shall not
+ * disclose such Confidential Information and shall use it only in
+ * accordance with the terms of the agreement you entered into with
+ * Nosto Solutions Ltd.
+ ******************************************************************************/
+
+// Window Shopping module
+ var domReadyCreator = require('../domready.js');
+
+function windowShopping(context) {
+    // Internal fields
+
+    // Internal log, enable if you want to debug the feature in more
+    // detail. Add "console.log(logMessage)" to enable logging (or some
+    // other logging facility).
+    //
+    function log(logMessage) {
+      //console.log("Window shopping ->", logMessage);
+    }
+
+    // Preview the discount popup
+    function preview() {
+      log("Calling preview()");
+      // TODO: implement
+    }
+
+    function open(url, responseData) {
+      var cookie = context.cookie("2c.ws");
+      
+      // is returning customer?
+      if (responseData && responseData.pv <= 1) {
+        if (cookie) {
+          cookie = context.cookie("2c.ws", "returning", (24*365*4), null, "/");
+        }
+      }
+
+      // show only if WS is explicitly triggered or shown as minimized
+      if ((url && url.queryKey && url.queryKey.nosto_overlay === "window-shopping") || (cookie === "minimized")) {
+        // reset state if WS has been closed within current session but now is explicitly triggered
+        if (cookie === "closed") {
+          cookie = context.cookie("2c.ws", "active", (24*365*4), null, "/");
+        }
+        
+        // TODO: push stats
+        internal.showPopup({});
+      }
+    }
+
+    var internal = {
+      showPopup: function(showPopupOptions) {
+        log("Calling showPopup()");
+        
+        var server = context.settings.server;
+
+        // Function to be executed after jQuery script load
+        function afterjQueryLoad() {
+            log("Calling afterJQueryLoad()");
+            var publicScript = server+"/public/javascripts/window-shopping.min.js";
+            context.nosto.loadScript(publicScript, afterOverlayScriptLoad);
+        }
+
+        // Function to be executed after
+        function afterOverlayScriptLoad() {
+            log("Calling afterOverlayScriptLoad()");
+            var options = {
+                preview: showPopupOptions.preview,
+                context: context,
+                debug: showPopupOptions.debug
+            };
+            // Call the loaded pop-up script
+            context.nosto.window.windowShoppingModal(options);
+        }
+        context.nosto.api.internal.loadInternalJQuery(afterjQueryLoad);
+      }
+    };
+    
+    return {
+        internal: internal,
+        preview: preview,
+        open: open
+    };
+}
+
+module.exports = windowShopping;
+},{"../domready.js":10}]},{},[17])

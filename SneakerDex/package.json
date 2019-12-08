@@ -20,7 +20,8 @@
     "react-addons-css-transition-group": "^15.4.1",
     "react-bootstrap": "^0.30.7",
     "react-dom": "^15.4.1",
-    "react-favicon": "0.0.5"
+    "react-favicon": "0.0.5",
+    "react-router": "^3.0.2"
   },
   "devDependencies": {
     "bootstrap": "^3.3.7",

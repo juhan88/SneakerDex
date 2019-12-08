@@ -16,6 +16,7 @@ const styles = {
     padding: '20px'
   },
   gridList: {
+    cols: 3,
     cellHeight: 225,
     overflowY: 'auto',
   },
@@ -25,24 +26,39 @@ const styles = {
 };
 
 
-const GridListExampleSimple = () => (
-  <div style={styles.root} className="sneaker-grid">
-    <GridList
-      cellHeight={styles.gridList.cellHeight}
-      style={styles.gridList}
-    >
-      <Subheader></Subheader>
-      {Sneakers.map((tile) => (
-        <GridTile
-          key={tile.img}
-          title={tile.title}
-          actionIcon={<ActionFlightTakeoff style={styles.icon}  />}
-        >
-          <img src={tile.img} />
-        </GridTile>
-      ))}
-    </GridList>
-  </div>
-);
+class GridListExampleSimple extends React.Component{
+  constructor(props) {
+    super(props);
+    this.state = {isToggleOn: true};
+
+    // This binding is necessary to make `this` work in the callback
+    this.onHoverOver = this.onHoverOver.bind(this);
+  }
+  onHoverOver(){
+    return
+  }
+  render(){
+      return <div style={styles.root}  className="sneaker-grid">
+          <GridList
+            cellHeight={styles.gridList.cellHeight}
+            style={styles.gridList}
+            cols={styles.gridList.cols}
+          >
+            <Subheader></Subheader>
+            {Sneakers.map((tile) => (
+
+                  <GridTile
+                    key={tile.img}
+                    title={tile.title}
+                    actionIcon={<ActionFlightTakeoff style={styles.icon}/>}
+                  >
+                    <img src={tile.img} onMouseOver={this.onHoverOver}/>
+                  </GridTile>
+
+            ))}
+          </GridList>
+        </div>
+ }
+}
 
 export default GridListExampleSimple

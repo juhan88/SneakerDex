@@ -1,0 +1,30 @@
+#tab-container {
+    margin-bottom: 15px;
+}
+
+#tab-container .tabs {
+    width: 100%;
+    overflow: hidden;
+}
+
+#tab-container .tabs li {
+    float: left;
+    margin: 0 2px 0 0;
+}
+
+#tab-container .tabs li a {
+    float: left;
+    display: block;
+    padding: 10px;
+    border: 1px solid #ddd;
+}
+
+#tab-container .tabs li.active a {
+    border-bottom: 1px solid #fff;
+}
+
+#tab-container .tab-content {
+    border: 1px solid #ddd;
+    padding: 10px;
+    margin: -1px 0 0 0;
+}

@@ -1,0 +1,1 @@
+jQuery(document).ready(function(){var thisPage=jQuery("#entire-page-wrap");thisPage.on("click",".accordion h5",function(){var $this=jQuery(this),drawer=$this.data("accordion");$this.toggleClass("open"),jQuery(".show-"+drawer).toggle()})});

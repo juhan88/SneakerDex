@@ -1,0 +1,104 @@
+/* Row css */
+
+.pagemanager ul{
+	width: 100%;
+	overflow: hidden;
+	clear: both;
+	padding-bottom: 10px;
+}
+
+/* Item css */
+
+.pagemanager li.item{
+	float: left;
+	overflow: hidden;
+}
+
+/* One block */
+.pagemanager .one-block li.item{
+	width: 100%;
+}
+
+/* Two blocks */
+.pagemanager .two-blocks li.item{
+	width: 48%;
+	margin-left: 4%;
+}
+.pagemanager .two-blocks li.first{
+	margin-left: 0;
+}
+
+/* Three blocks */
+.pagemanager .three-blocks li.item{
+	width: 32%;
+	margin-left: 2%;
+}
+.pagemanager .three-blocks li.first{
+	margin-left: 0;
+}
+
+/* Four blocks */
+.pagemanager .four-blocks li.item{
+	width: 24%;
+	margin-left: 1.3%;
+}
+.pagemanager .four-blocks li.first{
+	margin-left: 0;
+}
+
+/* Five blocks */
+.pagemanager .five-blocks li.item{
+	width: 19.1%;
+	margin-left: 1.1%;
+}
+.pagemanager .five-blocks li.first{
+	margin-left: 0;
+}
+
+/* Six blocks */
+.pagemanager .six-blocks li.item{
+	width: 16%;
+	margin-left: 0.8%;
+}
+.pagemanager .six-blocks li.first{
+	margin-left: 0;
+}
+
+
+/* Image css */
+
+/* Toplist css */
+
+.toplist ol{
+	overflow: hidden;
+	clear: both;
+	padding-bottom: 10px;
+}
+
+.horizontal_with_images li{
+	float: left;
+	width: 32%;
+	margin-left: 2%;
+	overflow: hidden;
+}
+.horizontal_with_images li.first{
+	margin-left: 0;
+}
+.horizontal_with_images li img{
+	width: 100%;
+}
+.vertical_productname ul{
+	border-top: 1px dashed #EFEFEF;
+}
+.vertical_productname li{
+	border-bottom: 1px dashed #EFEFEF;
+	padding: 3px 10px;
+}
+.vertical_with_images li{
+	border-bottom: 1px dashed #EFEFEF;
+	padding: 3px 10px;
+}
+
+/* HTML css */
+
+/* Slideshow css */
